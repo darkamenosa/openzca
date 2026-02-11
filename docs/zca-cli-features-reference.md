@@ -134,14 +134,6 @@ Command groups:
 ## Listen Command
 - `openzca listen [--echo] [--prefix <text>] [--webhook <url>] [--raw] [--keep-alive]`
 
-## License Commands (Optional/Local Only)
-These are local metadata helpers in this repo, not commercial enforcement:
-- `openzca license support-code`
-- `openzca license me-id`
-- `openzca license activate <key>`
-- `openzca license status`
-- `openzca license deactivate [--force]`
-
 ## Basic Usage Flow
 ```bash
 # 1) Login
