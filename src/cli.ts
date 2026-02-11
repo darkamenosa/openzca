@@ -175,6 +175,24 @@ function normalizeAccountInfo(rawValue: unknown): {
   };
 }
 
+function normalizeMeInfoOutput(rawValue: unknown): Record<string, unknown> {
+  const info = normalizeAccountInfo(rawValue);
+  const avatar = getStringCandidate(info.profile, [
+    "avatar",
+    "avatarUrl",
+    "avatar_url",
+    "thumbSrc",
+    "thumb",
+  ]);
+
+  return {
+    ...info.profile,
+    userId: info.userId || undefined,
+    displayName: info.displayName || undefined,
+    avatar: avatar || undefined,
+  };
+}
+
 async function currentProfile(_command?: Command): Promise<string> {
   const opts = program.opts() as { profile?: string };
   return resolveProfileName(opts.profile);
@@ -414,6 +432,7 @@ async function emitQrBase64FromDetachedLogin(profile: string, qrPath?: string): 
       env: {
         ...process.env,
         OPENZCA_QR_RENDER: "ascii",
+        OPENZCA_QR_AUTO_OPEN: "0",
       },
     },
   );
@@ -1888,12 +1907,12 @@ me
   .action(
     wrapAction(async (opts: { json?: boolean }, command: Command) => {
       const { api } = await requireApi(command);
-      const info = normalizeAccountInfo(await api.fetchAccountInfo());
+      const outputValue = normalizeMeInfoOutput(await api.fetchAccountInfo());
       if (opts.json) {
-        output(info.profile, true);
+        output(outputValue, true);
         return;
       }
-      output(info.profile, false);
+      output(outputValue, false);
     }),
   );
 
@@ -2038,9 +2057,9 @@ me
 program
   .command("listen")
   .description("Listen for real-time incoming messages")
-  .option("--echo", "Echo incoming text message")
-  .option("--prefix <prefix>", "Only process text starting with prefix")
-  .option("--webhook <url>", "POST message payload to webhook")
+  .option("-e, --echo", "Echo incoming text message")
+  .option("-p, --prefix <prefix>", "Only process text starting with prefix")
+  .option("-w, --webhook <url>", "POST message payload to webhook")
   .option("-r, --raw", "Output JSON line payload")
   .option("-k, --keep-alive", "Auto restart listener on disconnect")
   .action(

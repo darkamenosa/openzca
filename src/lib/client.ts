@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { imageSize } from "image-size";
+import * as qrcodeTerminal from "qrcode-terminal";
 import {
   LoginQRCallbackEventType,
   type API,
@@ -76,6 +77,19 @@ function renderInlineQrPngIfSupported(
       );
     }
     return false;
+  } catch {
+    return false;
+  }
+}
+
+function renderAsciiQrFromCode(code: string): boolean {
+  if (!process.stdout.isTTY) return false;
+  if (!code || !code.trim()) return false;
+  if (process.env.OPENZCA_QR_ASCII === "0") return false;
+
+  try {
+    qrcodeTerminal.generate(code, { small: true });
+    return true;
   } catch {
     return false;
   }
@@ -216,9 +230,16 @@ export async function loginWithQrAndPersist(
           event.data.image,
           targetPath,
         );
+        const asciiRendered = !rendered
+          ? renderAsciiQrFromCode(event.data.code)
+          : false;
 
+        const autoOpenHeadless =
+          !process.stdout.isTTY && process.env.OPENZCA_QR_AUTO_OPEN !== "0";
         const shouldOpen =
-          Boolean(opts?.openQr) || process.env.OPENZCA_QR_OPEN === "1";
+          Boolean(opts?.openQr) ||
+          process.env.OPENZCA_QR_OPEN === "1" ||
+          autoOpenHeadless;
         if (shouldOpen) {
           const opened = tryOpenFile(absolutePath);
           if (opened) {
@@ -228,8 +249,10 @@ export async function loginWithQrAndPersist(
           }
         }
 
-        if (!rendered) {
+        if (!rendered && !asciiRendered) {
           console.log("This terminal does not support inline QR rendering.");
+        } else if (asciiRendered) {
+          console.log("Scan the QR code above with Zalo app to login.");
         }
 
         console.log(`QR code saved to: ${targetPath}`);
