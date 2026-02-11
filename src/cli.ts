@@ -180,6 +180,27 @@ async function currentProfile(_command?: Command): Promise<string> {
   return resolveProfileName(opts.profile);
 }
 
+async function profileForLogin(): Promise<string> {
+  const opts = program.opts() as { profile?: string };
+  const explicit = opts.profile?.trim();
+  const fromEnv = process.env.ZCA_PROFILE?.trim();
+
+  if (explicit) {
+    await ensureProfile(explicit);
+    return explicit;
+  }
+
+  if (fromEnv) {
+    await ensureProfile(fromEnv);
+    return fromEnv;
+  }
+
+  const db = await listProfiles();
+  const fallback = db.defaultProfile || "default";
+  await ensureProfile(fallback);
+  return fallback;
+}
+
 async function requireApi(command?: Command): Promise<{ profile: string; api: API }> {
   const profile = await currentProfile(command);
   const api = await loginWithStoredCredentials(profile);
@@ -617,15 +638,14 @@ const auth = program.command("auth").description("Authentication and local cache
 auth
   .command("login")
   .description("Login with QR code")
-  .option("--qr-path <path>", "Save QR image path")
+  .option("-q, --qr-path <path>", "Save QR image path")
   .option(
     "--qr-base64",
     "Output QR code as data URL and return immediately (integration mode)",
   )
   .action(
     wrapAction(async (opts: { qrPath?: string; qrBase64?: boolean }, command: Command) => {
-      const profile = await currentProfile(command);
-      await ensureProfile(profile);
+      const profile = await profileForLogin();
 
       if (opts.qrBase64) {
         await emitQrBase64FromDetachedLogin(profile, opts.qrPath);
@@ -637,10 +657,16 @@ auth
 
       console.log(`Logged in profile ${profile} as ${me.displayName} (${me.userId})`);
 
-      const cache = await refreshCacheForProfile(profile, api);
-      console.log(
-        `Cache refreshed: ${cache.friends} friends, ${cache.groups} groups`,
-      );
+      try {
+        const cache = await refreshCacheForProfile(profile, api);
+        console.log(
+          `Cache refreshed: ${cache.friends} friends, ${cache.groups} groups`,
+        );
+      } catch (error) {
+        console.error(
+          `Warning: login succeeded but cache refresh failed (${error instanceof Error ? error.message : String(error)})`,
+        );
+      }
     }),
   );
 
@@ -686,8 +712,7 @@ auth
       const profile = await currentProfile(command);
       const credentials = await loadCredentials(profile);
       if (!credentials) {
-        console.log(`Profile ${profile}: not logged in`);
-        return;
+        throw new Error(`Profile ${profile}: not logged in`);
       }
 
       const api = await createZaloClient().login(toCredentials(credentials));
@@ -2118,14 +2143,30 @@ program
         });
 
         await new Promise<void>((resolve) => {
+          let settled = false;
+
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            resolve();
+          };
+
           api.listener.on("closed", (code, reason) => {
             console.log(`Listener closed (${code}) ${reason || ""}`);
-            resolve();
+            // In keep-alive mode, zca-js handles reconnect internally.
+            // Do not terminate the process on transient close events.
+            if (!opts.keepAlive) {
+              finish();
+            }
           });
 
           const onSigint = () => {
-            api.listener.stop();
-            resolve();
+            try {
+              api.listener.stop();
+            } catch {
+              // ignore
+            }
+            finish();
           };
 
           process.once("SIGINT", onSigint);
