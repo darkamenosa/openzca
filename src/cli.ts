@@ -1,6 +1,10 @@
 #!/usr/bin/env node
+import { createRequire } from "node:module";
 import fs from "node:fs/promises";
 import path from "node:path";
+
+const require = createRequire(import.meta.url);
+const { version: PKG_VERSION } = require("../package.json");
 import util from "node:util";
 import { Command } from "commander";
 import {
@@ -348,7 +352,7 @@ async function parseCredentialFile(filePath: string): Promise<Credentials> {
 program
   .name("openzca")
   .description("Open-source zca-cli compatible wrapper powered by zca-js")
-  .version("0.1.0")
+  .version(PKG_VERSION)
   .option("-p, --profile <name>", "Profile name")
   .showHelpAfterError();
 
