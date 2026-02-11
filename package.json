@@ -1,0 +1,36 @@
+{
+  "name": "openzca",
+  "version": "0.1.0",
+  "description": "Open-source zca-cli compatible wrapper powered by zca-js",
+  "type": "module",
+  "bin": {
+    "openzca": "dist/cli.js",
+    "zca": "dist/cli.js"
+  },
+  "main": "dist/cli.js",
+  "scripts": {
+    "build": "tsup src/cli.ts --format esm --target node18 --out-dir dist --clean",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "zalo",
+    "cli",
+    "zca",
+    "automation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^14.0.2",
+    "image-size": "^2.0.2",
+    "zca-js": "^2.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "tsup": "^8.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.2"
+  }
+}
