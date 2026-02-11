@@ -52,6 +52,8 @@ openzca listen
 | `openzca auth cache-clear` | Clear local cache |
 
 QR login renders inline in supported terminals (Ghostty, Kitty, WezTerm, iTerm2) with ASCII fallback for others.
+If QR is not visible in your terminal, use `openzca auth login --open-qr` (macOS/Linux desktop) or set `OPENZCA_QR_OPEN=1`.
+You can also open the saved file manually (for example: `open qr.png` on macOS).
 
 ### msg — Messaging
 

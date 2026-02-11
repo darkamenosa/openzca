@@ -640,11 +640,19 @@ auth
   .description("Login with QR code")
   .option("-q, --qr-path <path>", "Save QR image path")
   .option(
+    "--open-qr",
+    "Open QR image in default viewer (or set OPENZCA_QR_OPEN=1)",
+  )
+  .option(
     "--qr-base64",
     "Output QR code as data URL and return immediately (integration mode)",
   )
   .action(
-    wrapAction(async (opts: { qrPath?: string; qrBase64?: boolean }, command: Command) => {
+    wrapAction(
+      async (
+        opts: { qrPath?: string; qrBase64?: boolean; openQr?: boolean },
+        command: Command,
+      ) => {
       const profile = await profileForLogin();
 
       if (opts.qrBase64) {
@@ -652,7 +660,9 @@ auth
         return;
       }
 
-      const { api } = await loginWithQrAndPersist(profile, opts.qrPath);
+      const { api } = await loginWithQrAndPersist(profile, opts.qrPath, {
+        openQr: opts.openQr,
+      });
       const me = normalizeAccountInfo(await api.fetchAccountInfo());
 
       console.log(`Logged in profile ${profile} as ${me.displayName} (${me.userId})`);
@@ -667,7 +677,8 @@ auth
           `Warning: login succeeded but cache refresh failed (${error instanceof Error ? error.message : String(error)})`,
         );
       }
-    }),
+      },
+    ),
   );
 
 auth

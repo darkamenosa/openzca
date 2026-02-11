@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { spawn } from "node:child_process";
 import path from "node:path";
 import { imageSize } from "image-size";
 import {
@@ -80,6 +81,56 @@ function renderInlineQrPngIfSupported(
   }
 }
 
+function quoteForShell(value: string): string {
+  if (process.platform === "win32") {
+    return `"${value.replace(/"/g, '\\"')}"`;
+  }
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function formatOpenInstruction(filePath: string): string {
+  const quoted = quoteForShell(filePath);
+  if (process.platform === "darwin") {
+    return `open ${quoted}`;
+  }
+  if (process.platform === "win32") {
+    return `start "" ${quoted}`;
+  }
+  return `xdg-open ${quoted}`;
+}
+
+function tryOpenFile(filePath: string): boolean {
+  try {
+    if (process.platform === "darwin") {
+      const proc = spawn("open", [filePath], {
+        detached: true,
+        stdio: "ignore",
+      });
+      proc.unref();
+      return true;
+    }
+
+    if (process.platform === "win32") {
+      const proc = spawn("cmd", ["/c", "start", "", filePath], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      proc.unref();
+      return true;
+    }
+
+    const proc = spawn("xdg-open", [filePath], {
+      detached: true,
+      stdio: "ignore",
+    });
+    proc.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function imageMetadataGetter(filePath: string): Promise<{
   width: number;
   height: number;
@@ -149,6 +200,7 @@ export async function loginWithCredentialPayload(
 export async function loginWithQrAndPersist(
   profileName: string,
   qrPath?: string,
+  opts?: { openQr?: boolean },
 ): Promise<{ api: API; credentials: Credentials }> {
   const zalo = createZaloClient();
   let captured: Credentials | null = null;
@@ -159,16 +211,30 @@ export async function loginWithQrAndPersist(
         console.log("\nScan this QR in your Zalo app:\n");
         const targetPath = qrPath ?? "qr.png";
         await event.actions.saveToFile(targetPath);
+        const absolutePath = path.resolve(targetPath);
         const rendered = renderInlineQrPngIfSupported(
           event.data.image,
           targetPath,
         );
-        if (!rendered) {
-          console.log(
-            `This terminal does not support inline QR rendering. Open and scan: ${path.resolve(targetPath)}`,
-          );
+
+        const shouldOpen =
+          Boolean(opts?.openQr) || process.env.OPENZCA_QR_OPEN === "1";
+        if (shouldOpen) {
+          const opened = tryOpenFile(absolutePath);
+          if (opened) {
+            console.log(`Opened QR image in default viewer: ${absolutePath}`);
+          } else {
+            console.log(`Could not auto-open QR image: ${absolutePath}`);
+          }
         }
+
+        if (!rendered) {
+          console.log("This terminal does not support inline QR rendering.");
+        }
+
         console.log(`QR code saved to: ${targetPath}`);
+        console.log(`QR file path: ${absolutePath}`);
+        console.log(`If QR is not visible, run: ${formatOpenInstruction(absolutePath)}`);
         break;
       }
       case LoginQRCallbackEventType.QRCodeScanned: {
