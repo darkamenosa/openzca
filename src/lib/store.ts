@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { LicenseDb, ProfileCachePayload, ProfilesDb, StoredCredentials } from "./types.js";
+import type { ProfileCachePayload, ProfilesDb, StoredCredentials } from "./types.js";
 
 const PROFILE_NAME_RE = /^[A-Za-z0-9_-]+$/;
 
@@ -11,7 +11,6 @@ export const APP_HOME =
     : path.join(os.homedir(), ".openzca");
 
 export const PROFILES_FILE = path.join(APP_HOME, "profiles.json");
-export const LICENSE_FILE = path.join(APP_HOME, "license.json");
 
 const DEFAULT_PROFILE = "default";
 
@@ -256,14 +255,3 @@ export async function clearCache(profileName: string): Promise<void> {
   await fs.rm(getCacheMetaPath(profileName), { force: true });
 }
 
-export async function loadLicense(): Promise<LicenseDb | null> {
-  return readJsonFile<LicenseDb>(LICENSE_FILE);
-}
-
-export async function saveLicense(data: LicenseDb): Promise<void> {
-  await writeJsonFile(LICENSE_FILE, data);
-}
-
-export async function clearLicense(): Promise<void> {
-  await fs.rm(LICENSE_FILE, { force: true });
-}

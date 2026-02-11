@@ -1,9 +1,6 @@
 #!/usr/bin/env node
-import crypto from "node:crypto";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import readline from "node:readline/promises";
 import util from "node:util";
 import { Command } from "commander";
 import {
@@ -17,21 +14,17 @@ import {
 } from "zca-js";
 import {
   APP_HOME,
-  LICENSE_FILE,
   PROFILES_FILE,
   addProfile,
   clearCache,
   clearCredentials,
-  clearLicense,
   ensureProfile,
   getCredentialsPath,
   listProfiles,
   loadCredentials,
-  loadLicense,
   readCache,
   removeProfile,
   resolveProfileName,
-  saveLicense,
   setDefaultProfile,
   setProfileLabel,
   writeCache,
@@ -334,48 +327,6 @@ async function fetchRecentMessagesViaListener(
       finish(error);
     }
   });
-}
-
-function makeDeviceFingerprint(): string {
-  const network = os.networkInterfaces();
-  const flattenedMacs = Object.values(network)
-    .flatMap((entries) => entries ?? [])
-    .map((entry) => entry.mac)
-    .filter((mac) => mac && mac !== "00:00:00:00:00:00")
-    .sort();
-
-  const raw = JSON.stringify({
-    hostname: os.hostname(),
-    platform: os.platform(),
-    arch: os.arch(),
-    cpus: os.cpus().map((cpu) => cpu.model),
-    totalmem: os.totalmem(),
-    macs: flattenedMacs,
-  });
-
-  return crypto.createHash("sha256").update(raw).digest("hex").slice(0, 12).toUpperCase();
-}
-
-function makeSupportCode(fingerprint: string): string {
-  return `ZCA-${fingerprint.slice(0, 4)}-${fingerprint.slice(4, 8)}-${fingerprint.slice(8, 12)}`;
-}
-
-function maskKey(key: string): string {
-  if (key.length <= 10) return key;
-  return `${key.slice(0, 6)}...${key.slice(-4)}`;
-}
-
-async function askConfirm(message: string): Promise<boolean> {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  try {
-    const answer = await rl.question(`${message} (y/N): `);
-    return ["y", "yes"].includes(answer.trim().toLowerCase());
-  } finally {
-    rl.close();
-  }
 }
 
 async function parseCredentialFile(filePath: string): Promise<Credentials> {
@@ -1965,97 +1916,6 @@ program
         });
       },
     ),
-  );
-
-const license = program.command("license").description("License commands");
-
-license
-  .command("support-code")
-  .description("Show device support code")
-  .action(
-    wrapAction(async () => {
-      const fingerprint = makeDeviceFingerprint();
-      console.log(makeSupportCode(fingerprint));
-    }),
-  );
-
-license
-  .command("me-id")
-  .description("Show your Zalo user ID (for account-based license)")
-  .action(
-    wrapAction(async (command: Command) => {
-      const { api } = await requireApi(command);
-      console.log(api.getOwnId());
-    }),
-  );
-
-license
-  .command("activate <key>")
-  .description("Activate local license key")
-  .action(
-    wrapAction(async (key: string) => {
-      const fingerprint = makeDeviceFingerprint();
-      const supportCode = makeSupportCode(fingerprint);
-
-      await saveLicense({
-        key,
-        activatedAt: new Date().toISOString(),
-        supportCode,
-        deviceFingerprint: fingerprint,
-      });
-
-      console.log("License activated.");
-      console.log(`Support code: ${supportCode}`);
-    }),
-  );
-
-license
-  .command("status")
-  .description("Show local license status")
-  .action(
-    wrapAction(async () => {
-      const data = await loadLicense();
-      if (!data) {
-        output(
-          {
-            active: false,
-            file: LICENSE_FILE,
-          },
-          false,
-        );
-        return;
-      }
-
-      output(
-        {
-          active: true,
-          key: maskKey(data.key),
-          activatedAt: data.activatedAt,
-          supportCode: data.supportCode,
-          file: LICENSE_FILE,
-        },
-        false,
-      );
-    }),
-  );
-
-license
-  .command("deactivate")
-  .option("--force", "Skip confirmation")
-  .description("Deactivate local license")
-  .action(
-    wrapAction(async (opts: { force?: boolean }) => {
-      if (!opts.force) {
-        const confirmed = await askConfirm("Deactivate license?");
-        if (!confirmed) {
-          console.log("Cancelled.");
-          return;
-        }
-      }
-
-      await clearLicense();
-      console.log("License deactivated.");
-    }),
   );
 
 program.parseAsync(process.argv);

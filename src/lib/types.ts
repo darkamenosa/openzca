@@ -22,9 +22,3 @@ export interface ProfileCachePayload {
   updatedAt: string;
 }
 
-export interface LicenseDb {
-  key: string;
-  activatedAt: string;
-  supportCode: string;
-  deviceFingerprint: string;
-}
