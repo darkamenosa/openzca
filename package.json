@@ -1,27 +1,45 @@
 {
   "name": "openzca",
   "version": "0.1.0",
-  "description": "Open-source zca-cli compatible wrapper powered by zca-js",
+  "description": "Free to use alternative zcacli for integrate Zalo with OpenClaw",
   "type": "module",
   "bin": {
     "openzca": "dist/cli.js",
     "zca": "dist/cli.js"
   },
   "main": "dist/cli.js",
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsup src/cli.ts --format esm --target node18 --out-dir dist --clean",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "lint": "tsc -p tsconfig.json --noEmit"
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "zalo",
     "cli",
     "zca",
+    "openclaw",
     "automation"
   ],
-  "author": "",
+  "author": "Tom",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darkamenosa/openzca.git"
+  },
+  "homepage": "https://github.com/darkamenosa/openzca#readme",
+  "bugs": {
+    "url": "https://github.com/darkamenosa/openzca/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@types/qrcode-terminal": "^0.12.2",
     "commander": "^14.0.2",

@@ -1,0 +1,8 @@
+src/
+docs/
+tsconfig.json
+.DS_Store
+qr.png
+node_modules/
+.gitignore
+.claude/
