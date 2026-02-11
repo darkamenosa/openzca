@@ -4,13 +4,11 @@ Free and open-source CLI for Zalo, built on [zca-js](https://github.com/nicenath
 
 ## Integrate with OpenClaw ZaloUser plugin
 
-If you want to enable the [zalouser](https://openclaw.com) OpenClaw plugin, install `openzca` instead of following the `zca` CLI instructions from their docs:
-
-```bash
-npm install -g openzca@latest
+Prompt:
+```
+help me to enable zalouser openclaw plugin. However, don't install zca cli follow their instruction, please use: npm install -g openzca@latest
 ```
 
-Then follow the OpenClaw ZaloUser plugin setup as usual — `openzca` is a drop-in replacement that works with the same commands.
 
 ## Install
 
