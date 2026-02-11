@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 const require = createRequire(import.meta.url);
@@ -349,6 +351,177 @@ async function parseCredentialFile(filePath: string): Promise<Credentials> {
   };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function waitForFileContent(filePath: string, timeoutMs: number): Promise<Buffer> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const data = await fs.readFile(filePath);
+      if (data.length > 0) {
+        return data;
+      }
+    } catch {
+      // Wait until file is created.
+    }
+
+    await sleep(150);
+  }
+
+  throw new Error(`Timed out waiting for QR image file: ${filePath}`);
+}
+
+async function emitQrBase64FromDetachedLogin(profile: string, qrPath?: string): Promise<void> {
+  const scriptPath = process.argv[1];
+  if (!scriptPath) {
+    throw new Error("Cannot resolve CLI entrypoint for QR base64 mode.");
+  }
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-qr-"));
+  const targetPath = path.resolve(qrPath ?? path.join(tempDir, "qr.png"));
+
+  const child = spawn(
+    process.execPath,
+    [scriptPath, "--profile", profile, "auth", "login", "--qr-path", targetPath],
+    {
+      detached: true,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        OPENZCA_QR_RENDER: "ascii",
+      },
+    },
+  );
+  child.unref();
+
+  const png = await waitForFileContent(targetPath, 20_000);
+  console.log(`data:image/png;base64,${png.toString("base64")}`);
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function getStringCandidate(record: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+  return "";
+}
+
+function normalizeFriendLookupRows(value: unknown): Record<string, unknown>[] {
+  const queue: unknown[] = [value];
+  const rows: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) {
+      continue;
+    }
+
+    if (Array.isArray(current)) {
+      queue.push(...current);
+      continue;
+    }
+
+    const record = asObject(current);
+    if (!record) {
+      continue;
+    }
+
+    for (const nestedKey of [
+      "data",
+      "user",
+      "users",
+      "items",
+      "results",
+      "profiles",
+      "friends",
+      "friend",
+      "profile",
+      "info",
+    ]) {
+      if (record[nestedKey] !== undefined && record[nestedKey] !== null) {
+        queue.push(record[nestedKey]);
+      }
+    }
+
+    const userId = getStringCandidate(record, [
+      "userId",
+      "uid",
+      "user_id",
+      "userKey",
+      "id",
+    ]);
+    const displayName = getStringCandidate(record, [
+      "displayName",
+      "zaloName",
+      "name",
+      "username",
+    ]);
+    const avatar = getStringCandidate(record, [
+      "avatar",
+      "avatarUrl",
+      "avatar_url",
+      "thumbSrc",
+      "thumb",
+    ]);
+
+    if (!userId && !displayName) {
+      continue;
+    }
+
+    const normalized: Record<string, unknown> = {
+      ...record,
+    };
+    if (userId) normalized.userId = userId;
+    if (displayName) normalized.displayName = displayName;
+    if (avatar) normalized.avatar = avatar;
+
+    const dedupeKey = userId || `${displayName}|${avatar}`;
+    if (seen.has(dedupeKey)) {
+      continue;
+    }
+    seen.add(dedupeKey);
+    rows.push(normalized);
+  }
+
+  return rows;
+}
+
+function toEpochSeconds(input: unknown): number {
+  const numeric =
+    typeof input === "number"
+      ? input
+      : typeof input === "string"
+        ? Number(input)
+        : Number.NaN;
+
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return Math.floor(Date.now() / 1000);
+  }
+
+  if (numeric > 10_000_000_000) {
+    return Math.floor(numeric / 1000);
+  }
+
+  return Math.floor(numeric);
+}
+
 program
   .name("openzca")
   .description("Open-source zca-cli compatible wrapper powered by zca-js")
@@ -445,10 +618,19 @@ auth
   .command("login")
   .description("Login with QR code")
   .option("--qr-path <path>", "Save QR image path")
+  .option(
+    "--qr-base64",
+    "Output QR code as data URL and return immediately (integration mode)",
+  )
   .action(
-    wrapAction(async (opts: { qrPath?: string }, command: Command) => {
+    wrapAction(async (opts: { qrPath?: string; qrBase64?: boolean }, command: Command) => {
       const profile = await currentProfile(command);
       await ensureProfile(profile);
+
+      if (opts.qrBase64) {
+        await emitQrBase64FromDetachedLogin(profile, opts.qrPath);
+        return;
+      }
 
       const { api } = await loginWithQrAndPersist(profile, opts.qrPath);
       const me = normalizeAccountInfo(await api.fetchAccountInfo());
@@ -573,7 +755,7 @@ const msg = program.command("msg").description("Messaging commands");
 
 msg
   .command("send <threadId> <message>")
-  .option("--group", "Send to group")
+  .option("-g, --group", "Send to group")
   .description("Send text message")
   .action(
     wrapAction(async (threadId: string, message: string, opts: { group?: boolean }, command: Command) => {
@@ -587,7 +769,7 @@ msg
   .command("image <threadId> [file]")
   .option("-u, --url <url>", "Image URL (repeatable)", collectValues, [] as string[])
   .option("-m, --message <message>", "Caption")
-  .option("--group", "Send to group")
+  .option("-g, --group", "Send to group")
   .description("Send image(s) from file or URL")
   .action(
     wrapAction(
@@ -633,7 +815,7 @@ msg
   .option("-u, --url <url>", "Video URL (repeatable)", collectValues, [] as string[])
   .option("-m, --message <message>", "Caption")
   .option("--thumbnail <url>", "Thumbnail URL (kept for compatibility)")
-  .option("--group", "Send to group")
+  .option("-g, --group", "Send to group")
   .description("Send video(s) from file or URL")
   .action(
     wrapAction(
@@ -677,7 +859,7 @@ msg
 msg
   .command("voice <threadId> [file]")
   .option("-u, --url <url>", "Voice URL (repeatable)", collectValues, [] as string[])
-  .option("--group", "Send to group")
+  .option("-g, --group", "Send to group")
   .description("Send voice message from file or URL")
   .action(
     wrapAction(
@@ -720,7 +902,7 @@ msg
 
 msg
   .command("sticker <threadId> <stickerId>")
-  .option("--group", "Send to group")
+  .option("-g, --group", "Send to group")
   .description("Send a sticker by sticker ID")
   .action(
     wrapAction(
@@ -753,7 +935,7 @@ msg
 
 msg
   .command("link <threadId> <url>")
-  .option("--group", "Send to group")
+  .option("-g, --group", "Send to group")
   .description("Send link")
   .action(
     wrapAction(async (threadId: string, url: string, opts: { group?: boolean }, command: Command) => {
@@ -765,7 +947,7 @@ msg
 
 msg
   .command("card <threadId> <contactId>")
-  .option("--group", "Send to group")
+  .option("-g, --group", "Send to group")
   .description("Send contact card")
   .action(
     wrapAction(
@@ -788,7 +970,7 @@ msg
 
 msg
   .command("react <msgId> <cliMsgId> <threadId> <reaction>")
-  .option("--group", "React in group")
+  .option("-g, --group", "React in group")
   .description("React to a message")
   .action(
     wrapAction(
@@ -816,7 +998,7 @@ msg
 
 msg
   .command("typing <threadId>")
-  .option("--group", "Typing in group")
+  .option("-g, --group", "Typing in group")
   .description("Send typing event")
   .action(
     wrapAction(async (threadId: string, opts: { group?: boolean }, command: Command) => {
@@ -832,7 +1014,7 @@ msg
 
 msg
   .command("forward <message> <targets...>")
-  .option("--group", "Forward to groups")
+  .option("-g, --group", "Forward to groups")
   .description("Forward text to multiple targets")
   .action(
     wrapAction(
@@ -855,7 +1037,7 @@ msg
 
 msg
   .command("delete <msgId> <cliMsgId> <uidFrom> <threadId>")
-  .option("--group", "Delete in group")
+  .option("-g, --group", "Delete in group")
   .option("--only-me", "Delete only for yourself")
   .description("Delete message")
   .action(
@@ -888,7 +1070,7 @@ msg
 
 msg
   .command("undo <msgId> <cliMsgId> <threadId>")
-  .option("--group", "Undo in group")
+  .option("-g, --group", "Undo in group")
   .description("Recall your sent message")
   .action(
     wrapAction(
@@ -916,7 +1098,7 @@ msg
 msg
   .command("upload <arg1> [arg2]")
   .option("-u, --url <url>", "File URL (repeatable)", collectValues, [] as string[])
-  .option("--group", "Upload in group")
+  .option("-g, --group", "Upload in group")
   .description("Upload and send file(s)")
   .action(
     wrapAction(
@@ -960,9 +1142,9 @@ msg
 
 msg
   .command("recent <threadId>")
-  .option("--group", "List recent messages for group thread")
+  .option("-g, --group", "List recent messages for group thread")
   .option("-n, --count <count>", "Number of messages (default: 20)", "20")
-  .option("--json", "JSON output")
+  .option("-j, --json", "JSON output")
   .description("List recent messages via websocket history")
   .action(
     wrapAction(
@@ -1019,7 +1201,7 @@ const group = program.command("group").description("Group management");
 
 group
   .command("list")
-  .option("--json", "JSON output")
+  .option("-j, --json", "JSON output")
   .description("List groups")
   .action(
     wrapAction(async (opts: { json?: boolean }, command: Command) => {
@@ -1055,7 +1237,7 @@ group
 
 group
   .command("members <groupId>")
-  .option("--json", "JSON output")
+  .option("-j, --json", "JSON output")
   .description("List group members")
   .action(
     wrapAction(async (groupId: string, opts: { json?: boolean }, command: Command) => {
@@ -1072,17 +1254,17 @@ group
         string,
         { displayName?: string; zaloName?: string }
       >;
-
-      if (opts.json) {
-        output({ group: groupInfo, profiles: profiles.profiles }, true);
-        return;
-      }
-
       const rows = ids.map((id) => ({
         userId: id,
         displayName: profileMap[id]?.displayName ?? "",
         zaloName: profileMap[id]?.zaloName ?? "",
       }));
+
+      if (opts.json) {
+        output(rows, true);
+        return;
+      }
+
       output(rows, false);
     }),
   );
@@ -1378,7 +1560,7 @@ const friend = program.command("friend").description("Friend management");
 
 friend
   .command("list")
-  .option("--json", "JSON output")
+  .option("-j, --json", "JSON output")
   .description("List all friends")
   .action(
     wrapAction(async (opts: { json?: boolean }, command: Command) => {
@@ -1402,7 +1584,7 @@ friend
 
 friend
   .command("find <query>")
-  .option("--json", "JSON output")
+  .option("-j, --json", "JSON output")
   .description("Find user by phone/username/name")
   .action(
     wrapAction(async (query: string, opts: { json?: boolean }, command: Command) => {
@@ -1436,13 +1618,26 @@ friend
         }
       }
 
-      output(result, Boolean(opts.json));
+      const rows = normalizeFriendLookupRows(result);
+      const shouldJson = Boolean(opts.json) || !process.stdout.isTTY;
+
+      if (shouldJson) {
+        output(rows, true);
+        return;
+      }
+
+      if (rows.length > 0) {
+        output(rows, false);
+        return;
+      }
+
+      output(result, false);
     }),
   );
 
 friend
   .command("online")
-  .option("--json", "JSON output")
+  .option("-j, --json", "JSON output")
   .description("List online friends")
   .action(
     wrapAction(async (opts: { json?: boolean }, command: Command) => {
@@ -1478,7 +1673,7 @@ friend
 
 friend
   .command("recommendations")
-  .option("--json", "JSON output")
+  .option("-j, --json", "JSON output")
   .description("Get recommendations")
   .action(
     wrapAction(async (opts: { json?: boolean }, command: Command) => {
@@ -1537,7 +1732,7 @@ friend
 
 friend
   .command("sent")
-  .option("--json", "JSON output")
+  .option("-j, --json", "JSON output")
   .description("List sent requests")
   .action(
     wrapAction(async (opts: { json?: boolean }, command: Command) => {
@@ -1588,7 +1783,7 @@ friend
 
 friend
   .command("aliases")
-  .option("--json", "JSON output")
+  .option("-j, --json", "JSON output")
   .description("List aliases")
   .action(
     wrapAction(async (opts: { json?: boolean }, command: Command) => {
@@ -1639,7 +1834,7 @@ friend
 
 friend
   .command("boards <conversationId>")
-  .option("--json", "JSON output")
+  .option("-j, --json", "JSON output")
   .description("Get boards in conversation")
   .action(
     wrapAction(async (conversationId: string, opts: { json?: boolean }, command: Command) => {
@@ -1652,14 +1847,14 @@ const me = program.command("me").description("Profile/account commands");
 
 me
   .command("info")
-  .option("--json", "JSON output")
+  .option("-j, --json", "JSON output")
   .description("Get account info")
   .action(
     wrapAction(async (opts: { json?: boolean }, command: Command) => {
       const { api } = await requireApi(command);
       const info = normalizeAccountInfo(await api.fetchAccountInfo());
       if (opts.json) {
-        output(info.raw, true);
+        output(info.profile, true);
         return;
       }
       output(info.profile, false);
@@ -1750,7 +1945,7 @@ me
 
 me
   .command("avatars")
-  .option("--json", "JSON output")
+  .option("-j, --json", "JSON output")
   .description("List avatars")
   .action(
     wrapAction(async (opts: { json?: boolean }, command: Command) => {
@@ -1810,8 +2005,8 @@ program
   .option("--echo", "Echo incoming text message")
   .option("--prefix <prefix>", "Only process text starting with prefix")
   .option("--webhook <url>", "POST message payload to webhook")
-  .option("--raw", "Output JSON line payload")
-  .option("--keep-alive", "Auto restart listener on disconnect")
+  .option("-r, --raw", "Output JSON line payload")
+  .option("-k, --keep-alive", "Auto restart listener on disconnect")
   .action(
     wrapAction(
       async (
@@ -1862,14 +2057,32 @@ program
             processedText = processedText.slice(opts.prefix.length).trimStart();
           }
 
+          const chatType = message.type === ThreadType.Group ? "group" : "user";
+          const messageData = message.data as Record<string, unknown>;
+          const threadName =
+            typeof messageData.threadName === "string"
+              ? messageData.threadName
+              : typeof messageData.tName === "string"
+                ? messageData.tName
+                : undefined;
+
           const payload = {
-            type: message.type === ThreadType.Group ? "group" : "user",
             threadId: message.threadId,
-            senderId: message.data.uidFrom,
-            senderName: message.data.dName,
             msgId: message.data.msgId,
             cliMsgId: message.data.cliMsgId,
             content: processedText,
+            type: message.type,
+            timestamp: toEpochSeconds(message.data.ts),
+            metadata: {
+              isGroup: message.type === ThreadType.Group,
+              threadName,
+              senderName: message.data.dName,
+              fromId: message.data.uidFrom,
+            },
+            // Backward-compatible convenience fields.
+            chatType,
+            senderId: message.data.uidFrom,
+            senderName: message.data.dName,
             ts: message.data.ts,
           };
 
@@ -1877,7 +2090,7 @@ program
             console.log(JSON.stringify(payload));
           } else {
             console.log(
-              `[${payload.type}] ${payload.senderName || payload.senderId} -> ${payload.threadId}: ${payload.content}`,
+              `[${chatType}] ${payload.senderName || payload.senderId} -> ${payload.threadId}: ${payload.content}`,
             );
           }
 
