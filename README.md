@@ -8,6 +8,8 @@ Free and open-source CLI for Zalo, built on [zca-js](https://github.com/nicenath
 npm install -g openzca@latest
 ```
 
+Command aliases: `openzca`, `zca`.
+
 Or run without installing:
 
 ```bash
