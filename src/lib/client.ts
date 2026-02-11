@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import { imageSize } from "image-size";
+import qrcode from "qrcode-terminal";
 import {
   LoginQRCallbackEventType,
   type API,
@@ -86,6 +87,10 @@ export async function loginWithQrAndPersist(
   const callback: LoginQRCallback = async (event) => {
     switch (event.type) {
       case LoginQRCallbackEventType.QRCodeGenerated: {
+        console.log("\nScan this QR in your Zalo app:\n");
+        qrcode.generate(event.data.code, { small: true });
+        console.log("");
+
         await event.actions.saveToFile(qrPath ?? "qr.png");
         console.log(`QR code saved to: ${qrPath ?? "qr.png"}`);
         break;

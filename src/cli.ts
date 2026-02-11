@@ -139,6 +139,43 @@ function formatDateOnly(input: Date): string {
   return `${y}-${m}-${d}`;
 }
 
+function normalizeAccountInfo(rawValue: unknown): {
+  raw: unknown;
+  profile: Record<string, unknown>;
+  userId: string;
+  displayName: string;
+} {
+  const raw = rawValue as Record<string, unknown> | null | undefined;
+  const profileCandidate =
+    raw && typeof raw === "object" && raw.profile && typeof raw.profile === "object"
+      ? (raw.profile as Record<string, unknown>)
+      : ((raw ?? {}) as Record<string, unknown>);
+
+  const userId =
+    String(
+      profileCandidate.userId ??
+        profileCandidate.uid ??
+        profileCandidate.userKey ??
+        profileCandidate.id ??
+        "",
+    ) || "";
+  const displayName =
+    String(
+      profileCandidate.displayName ??
+        profileCandidate.zaloName ??
+        profileCandidate.username ??
+        profileCandidate.name ??
+        "",
+    ) || "";
+
+  return {
+    raw: rawValue,
+    profile: profileCandidate,
+    userId,
+    displayName,
+  };
+}
+
 async function currentProfile(_command?: Command): Promise<string> {
   const opts = program.opts() as { profile?: string };
   return resolveProfileName(opts.profile);
@@ -177,6 +214,126 @@ async function refreshCacheForProfile(profile: string, api: API): Promise<{ frie
     friends: friends.length,
     groups: groups.length,
   };
+}
+
+async function fetchRecentMessagesViaListener(
+  api: API,
+  threadId: string,
+  threadType: ThreadType,
+  count: number,
+): Promise<
+  Array<{
+    threadId: string;
+    type: ThreadType;
+    data: {
+      msgId: string;
+      cliMsgId: string;
+      uidFrom: string;
+      dName?: string;
+      ts: string;
+      msgType: string;
+      content: unknown;
+    };
+  }>
+> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const collected: Array<{
+      threadId: string;
+      type: ThreadType;
+      data: {
+        msgId: string;
+        cliMsgId: string;
+        uidFrom: string;
+        dName?: string;
+        ts: string;
+        msgType: string;
+        content: unknown;
+      };
+    }> = [];
+
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      api.listener.off("connected", onConnected);
+      api.listener.off("old_messages", onOldMessages);
+      api.listener.off("error", onError);
+      api.listener.off("closed", onClosed);
+
+      try {
+        api.listener.stop();
+      } catch {
+        // ignore
+      }
+    };
+
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(collected.slice(0, count));
+    };
+
+    const onConnected = () => {
+      try {
+        api.listener.requestOldMessages(threadType, null);
+      } catch (error) {
+        finish(error);
+      }
+    };
+
+    const onOldMessages = (messages: unknown[], type: ThreadType) => {
+      if (type !== threadType) return;
+
+      const typedMessages = messages as Array<{
+        threadId: string;
+        type: ThreadType;
+        data: {
+          msgId: string;
+          cliMsgId: string;
+          uidFrom: string;
+          dName?: string;
+          ts: string;
+          msgType: string;
+          content: unknown;
+        };
+      }>;
+
+      for (const message of typedMessages) {
+        if (message.threadId === threadId) {
+          collected.push(message);
+        }
+      }
+
+      finish();
+    };
+
+    const onError = (error: unknown) => {
+      finish(error);
+    };
+
+    const onClosed = () => {
+      finish();
+    };
+
+    const timeoutId = setTimeout(() => {
+      finish();
+    }, 12_000);
+
+    api.listener.on("connected", onConnected);
+    api.listener.on("old_messages", onOldMessages);
+    api.listener.on("error", onError);
+    api.listener.on("closed", onClosed);
+
+    try {
+      api.listener.start();
+    } catch (error) {
+      finish(error);
+    }
+  });
 }
 
 function makeDeviceFingerprint(): string {
@@ -339,7 +496,7 @@ auth
       await ensureProfile(profile);
 
       const { api } = await loginWithQrAndPersist(profile, opts.qrPath);
-      const me = await api.fetchAccountInfo();
+      const me = normalizeAccountInfo(await api.fetchAccountInfo());
 
       console.log(`Logged in profile ${profile} as ${me.displayName} (${me.userId})`);
 
@@ -355,11 +512,20 @@ auth
   .alias("login-creds")
   .description("Login using credential JSON file")
   .action(
-    wrapAction(async (file = "credentials.json", command: Command) => {
+    wrapAction(async (file: string | undefined, command: Command) => {
       const profile = await currentProfile(command);
-      const credentials = await parseCredentialFile(path.resolve(file));
+      const credentials = file
+        ? await parseCredentialFile(path.resolve(file))
+        : toCredentials(
+            (await loadCredentials(profile)) ??
+              (() => {
+                throw new Error(
+                  `No saved credentials for profile \"${profile}\". Run: openzca auth login`,
+                );
+              })(),
+          );
       const api = await loginWithCredentialPayload(profile, credentials);
-      const me = await api.fetchAccountInfo();
+      const me = normalizeAccountInfo(await api.fetchAccountInfo());
       console.log(`Logged in profile ${profile} as ${me.displayName} (${me.userId})`);
     }),
   );
@@ -388,7 +554,7 @@ auth
       }
 
       const api = await createZaloClient().login(toCredentials(credentials));
-      const me = await api.fetchAccountInfo();
+      const me = normalizeAccountInfo(await api.fetchAccountInfo());
 
       output(
         {
@@ -837,6 +1003,63 @@ msg
     ),
   );
 
+msg
+  .command("recent <threadId>")
+  .option("--group", "List recent messages for group thread")
+  .option("-n, --count <count>", "Number of messages (default: 20)", "20")
+  .option("--json", "JSON output")
+  .description("List recent messages via websocket history")
+  .action(
+    wrapAction(
+      async (
+        threadId: string,
+        opts: { group?: boolean; count: string; json?: boolean },
+        command: Command,
+      ) => {
+        const { api } = await requireApi(command);
+        const parsedCount = Number(opts.count);
+        const count = Number.isFinite(parsedCount)
+          ? Math.min(Math.max(Math.trunc(parsedCount), 1), 200)
+          : 20;
+
+        const threadType = opts.group ? ThreadType.Group : ThreadType.User;
+        const messages = await fetchRecentMessagesViaListener(
+          api,
+          threadId,
+          threadType,
+          count,
+        );
+        const rows = messages.map((message) => ({
+          msgId: message.data.msgId,
+          cliMsgId: message.data.cliMsgId,
+          senderId: message.data.uidFrom,
+          senderName: message.data.dName,
+          ts: message.data.ts,
+          msgType: message.data.msgType,
+          content:
+            typeof message.data.content === "string"
+              ? message.data.content
+              : JSON.stringify(message.data.content),
+        }));
+
+        if (opts.json) {
+          output(
+            {
+              threadId,
+              threadType: threadType === ThreadType.Group ? "group" : "user",
+              count: rows.length,
+              messages: rows,
+            },
+            true,
+          );
+          return;
+        }
+
+        output(rows, false);
+      },
+    ),
+  );
+
 const group = program.command("group").description("Group management");
 
 group
@@ -1269,8 +1492,32 @@ friend
   .action(
     wrapAction(async (opts: { json?: boolean }, command: Command) => {
       const { api } = await requireApi(command);
-      const data = await api.getFriendOnlines();
-      output(data.onlines, Boolean(opts.json));
+      try {
+        const data = await api.getFriendOnlines();
+        output(data.onlines, Boolean(opts.json));
+      } catch (error) {
+        // zca-js may throw JSON parse error for unexpected status payloads.
+        // Fallback to active flags from friend list to keep command usable.
+        const friends = await api.getAllFriends();
+        const fallback = friends
+          .filter(
+            (friendItem) =>
+              Number(friendItem.isActive) === 1 ||
+              Number(friendItem.isActiveWeb) === 1 ||
+              Number(friendItem.isActivePC) === 1,
+          )
+          .map((friendItem) => ({
+            userId: friendItem.userId,
+            status: "online",
+            displayName: friendItem.displayName,
+            source: "fallback_active_flags",
+          }));
+
+        console.error(
+          `Warning: friend online fallback used (${error instanceof Error ? error.message : String(error)})`,
+        );
+        output(fallback, Boolean(opts.json));
+      }
     }),
   );
 
@@ -1455,7 +1702,12 @@ me
   .action(
     wrapAction(async (opts: { json?: boolean }, command: Command) => {
       const { api } = await requireApi(command);
-      output(await api.fetchAccountInfo(), Boolean(opts.json));
+      const info = normalizeAccountInfo(await api.fetchAccountInfo());
+      if (opts.json) {
+        output(info.raw, true);
+        return;
+      }
+      output(info.profile, false);
     }),
   );
 
@@ -1486,21 +1738,25 @@ me
         }
 
         const { api } = await requireApi(command);
-        const current = await api.fetchAccountInfo();
+        const currentInfo = normalizeAccountInfo(await api.fetchAccountInfo());
+        const current = currentInfo.profile;
+        const currentSdob = String(current.sdob ?? "");
+        const currentDob = Number(current.dob ?? 0);
 
         let dob = opts.birthday;
         if (!dob) {
-          if (/^\d{4}-\d{2}-\d{2}$/.test(current.sdob || "")) {
-            dob = current.sdob;
-          } else if (current.dob && Number.isFinite(current.dob)) {
-            const ms = current.dob > 10_000_000_000 ? current.dob : current.dob * 1000;
+          if (/^\d{4}-\d{2}-\d{2}$/.test(currentSdob)) {
+            dob = currentSdob;
+          } else if (currentDob && Number.isFinite(currentDob)) {
+            const ms = currentDob > 10_000_000_000 ? currentDob : currentDob * 1000;
             dob = formatDateOnly(new Date(ms));
           } else {
             dob = "1970-01-01";
           }
         }
 
-        let gender = current.gender;
+        let gender =
+          Number(current.gender) === Gender.Female ? Gender.Female : Gender.Male;
         if (opts.gender) {
           const normalized = opts.gender.trim().toLowerCase();
           if (normalized === "male") gender = Gender.Male;
@@ -1508,7 +1764,11 @@ me
           else throw new Error('Gender must be "male" or "female"');
         }
 
-        const name = opts.name ?? current.displayName ?? current.zaloName;
+        const name =
+          opts.name ??
+          String(
+            current.displayName ?? current.zaloName ?? current.username ?? currentInfo.displayName,
+          );
 
         const response = await api.updateProfile({
           profile: {
