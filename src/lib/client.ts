@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
+import path from "node:path";
 import { imageSize } from "image-size";
-import qrcode from "qrcode-terminal";
 import {
   LoginQRCallbackEventType,
   type API,
@@ -10,6 +10,75 @@ import {
 } from "zca-js";
 import { loadCredentials, saveCredentials } from "./store.js";
 import type { StoredCredentials } from "./types.js";
+
+function renderInlineQrPngIfSupported(
+  pngBase64: string,
+  filePath: string,
+): boolean {
+  if (!process.stdout.isTTY) return false;
+
+  try {
+    const termProgram = (process.env.TERM_PROGRAM ?? "").toLowerCase();
+    const term = (process.env.TERM ?? "").toLowerCase();
+    const renderMode = (process.env.OPENZCA_QR_RENDER ?? "auto").toLowerCase();
+    const debug = process.env.OPENZCA_QR_DEBUG === "1";
+
+    const shouldTryKitty =
+      renderMode === "kitty" ||
+      (renderMode === "auto" &&
+        (term.includes("ghostty") ||
+          term.includes("kitty") ||
+          termProgram.includes("ghostty") ||
+          termProgram.includes("wezterm")));
+    const shouldTryIterm =
+      renderMode === "iterm" ||
+      (renderMode === "auto" &&
+        termProgram === "iterm.app" &&
+        process.env.OPENZCA_QR_DISABLE_ITERM_INLINE !== "1");
+
+    // Ghostty/kitty/wezterm: kitty graphics protocol (chunked PNG payload).
+    // This renders the exact qr.png bytes and is generally supported by these terminals.
+    if (shouldTryKitty) {
+      if (debug) console.error("[openzca] QR render mode: kitty");
+      const payload = pngBase64.replace(/\s+/g, "");
+      if (payload.length === 0) return false;
+      const chunkSize = 1024;
+      for (let start = 0; start < payload.length; start += chunkSize) {
+        const chunk = payload.slice(start, start + chunkSize);
+        const hasMore = start + chunkSize < payload.length ? 1 : 0;
+        const metadata = start === 0 ? "a=T,f=100," : "";
+        const apc = `\u001B_G${metadata}m=${hasMore};${chunk}\u001B\\`;
+        process.stdout.write(apc);
+      }
+      process.stdout.write("\n");
+      return true;
+    }
+
+    // iTerm2 inline images (enabled by default on iTerm).
+    // Set OPENZCA_QR_DISABLE_ITERM_INLINE=1 to force ASCII fallback.
+    if (shouldTryIterm) {
+      if (debug) console.error("[openzca] QR render mode: iterm");
+      const widthEnv = Number.parseInt(process.env.OPENZCA_QR_WIDTH ?? "", 10);
+      const widthCells =
+        Number.isFinite(widthEnv) && widthEnv >= 16 && widthEnv <= 80
+          ? widthEnv
+          : 34;
+      const encodedName = Buffer.from(path.basename(filePath)).toString("base64");
+      const osc1337 = `\u001B]1337;File=name=${encodedName};inline=1;width=${widthCells};preserveAspectRatio=1:${pngBase64}\u0007`;
+      process.stdout.write(`${osc1337}\n`);
+      return true;
+    }
+
+    if (debug) {
+      console.error(
+        `[openzca] QR render mode: ascii (TERM_PROGRAM=${termProgram || "-"}, TERM=${term || "-"}, OPENZCA_QR_RENDER=${renderMode})`,
+      );
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 async function imageMetadataGetter(filePath: string): Promise<{
   width: number;
@@ -88,11 +157,18 @@ export async function loginWithQrAndPersist(
     switch (event.type) {
       case LoginQRCallbackEventType.QRCodeGenerated: {
         console.log("\nScan this QR in your Zalo app:\n");
-        qrcode.generate(event.data.code, { small: true });
-        console.log("");
-
-        await event.actions.saveToFile(qrPath ?? "qr.png");
-        console.log(`QR code saved to: ${qrPath ?? "qr.png"}`);
+        const targetPath = qrPath ?? "qr.png";
+        await event.actions.saveToFile(targetPath);
+        const rendered = renderInlineQrPngIfSupported(
+          event.data.image,
+          targetPath,
+        );
+        if (!rendered) {
+          console.log(
+            `This terminal does not support inline QR rendering. Open and scan: ${path.resolve(targetPath)}`,
+          );
+        }
+        console.log(`QR code saved to: ${targetPath}`);
         break;
       }
       case LoginQRCallbackEventType.QRCodeScanned: {
