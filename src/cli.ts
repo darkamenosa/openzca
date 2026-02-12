@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -48,6 +49,7 @@ import {
   collectValues,
   downloadUrlsToTempFiles,
   isHttpUrl,
+  normalizeMediaInput,
   normalizeInputList,
 } from "./lib/media.js";
 
@@ -64,14 +66,111 @@ const EMOJI_REACTION_MAP: Record<string, Reactions> = {
   "😡": Reactions.ANGRY,
 };
 
+type DebugOptions = {
+  debug?: boolean;
+  debugFile?: string;
+  profile?: string;
+};
+
+const DEBUG_COMMAND_START = new WeakMap<Command, number>();
+
+function parseDebugFlag(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function getActionCommand(args: unknown[]): Command | undefined {
+  for (let index = args.length - 1; index >= 0; index -= 1) {
+    const item = args[index];
+    if (item instanceof Command) {
+      return item;
+    }
+  }
+  return undefined;
+}
+
+function commandPathLabel(command?: Command): string | undefined {
+  if (!command) return undefined;
+  const names: string[] = [];
+  let current: Command | null = command;
+  while (current) {
+    const name = current.name();
+    if (name) {
+      names.unshift(name);
+    }
+    current = current.parent ?? null;
+  }
+  return names.join(" ");
+}
+
+function getDebugOptions(command?: Command): DebugOptions {
+  if (command) {
+    if (typeof command.optsWithGlobals === "function") {
+      return command.optsWithGlobals() as DebugOptions;
+    }
+    return command.opts() as DebugOptions;
+  }
+  if (typeof program.optsWithGlobals === "function") {
+    return program.optsWithGlobals() as DebugOptions;
+  }
+  return program.opts() as DebugOptions;
+}
+
+function resolveDebugEnabled(command?: Command): boolean {
+  if (parseDebugFlag(process.env.OPENZCA_DEBUG)) {
+    return true;
+  }
+  return Boolean(getDebugOptions(command).debug);
+}
+
+function resolveDebugFilePath(command?: Command): string {
+  const options = getDebugOptions(command);
+  const configured =
+    options.debugFile?.trim() ||
+    process.env.OPENZCA_DEBUG_FILE?.trim() ||
+    path.join(APP_HOME, "logs", "openzca-debug.log");
+  const normalized = normalizeMediaInput(configured);
+  return path.isAbsolute(normalized) ? normalized : path.resolve(process.cwd(), normalized);
+}
+
+function writeDebugLine(
+  event: string,
+  details?: Record<string, unknown>,
+  command?: Command,
+): void {
+  if (!resolveDebugEnabled(command)) {
+    return;
+  }
+  const payload = details ? JSON.stringify(details) : "";
+  const line = `${new Date().toISOString()} ${event}${payload ? ` ${payload}` : ""}\n`;
+  const filePath = resolveDebugFilePath(command);
+  try {
+    fsSync.mkdirSync(path.dirname(filePath), { recursive: true });
+    fsSync.appendFileSync(filePath, line, "utf8");
+  } catch {
+    // Best effort debug logging; never fail command execution.
+  }
+}
+
 function wrapAction<T extends unknown[]>(
   handler: (...args: T) => Promise<void>,
 ): (...args: T) => Promise<void> {
   return async (...args: T) => {
+    const command = getActionCommand(args);
     try {
       await handler(...args);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      writeDebugLine(
+        "command.error",
+        {
+          command: commandPathLabel(command),
+          message,
+          stack: error instanceof Error ? error.stack : undefined,
+        },
+        command,
+      );
       console.error(`Error: ${message}`);
       process.exitCode = 1;
     }
@@ -662,8 +761,9 @@ function resolveOpenClawMediaDir(): string {
 }
 
 function resolveInboundMediaDir(profile: string): string {
-  const configured = process.env.OPENZCA_LISTEN_MEDIA_DIR?.trim();
-  if (configured) {
+  const configuredRaw = process.env.OPENZCA_LISTEN_MEDIA_DIR?.trim();
+  if (configuredRaw) {
+    const configured = normalizeMediaInput(configuredRaw);
     return path.isAbsolute(configured) ? configured : path.resolve(process.cwd(), configured);
   }
   const legacyRequested = process.env.OPENZCA_LISTEN_MEDIA_LEGACY_DIR?.trim() === "1";
@@ -887,7 +987,42 @@ program
   .description("Open-source zca-cli compatible wrapper powered by zca-js")
   .version(PKG_VERSION)
   .option("-p, --profile <name>", "Profile name")
+  .option("--debug", "Enable debug logging")
+  .option("--debug-file <path>", "Debug log file path")
   .showHelpAfterError();
+
+program.hook("preAction", (_parent, actionCommand) => {
+  if (!resolveDebugEnabled(actionCommand)) {
+    return;
+  }
+  DEBUG_COMMAND_START.set(actionCommand, Date.now());
+  writeDebugLine(
+    "command.start",
+    {
+      command: commandPathLabel(actionCommand),
+      argv: process.argv.slice(2),
+      cwd: process.cwd(),
+      profileFlag: getDebugOptions(actionCommand).profile ?? null,
+      envProfile: process.env.ZCA_PROFILE ?? null,
+    },
+    actionCommand,
+  );
+});
+
+program.hook("postAction", (_parent, actionCommand) => {
+  if (!resolveDebugEnabled(actionCommand)) {
+    return;
+  }
+  const startedAt = DEBUG_COMMAND_START.get(actionCommand);
+  writeDebugLine(
+    "command.done",
+    {
+      command: commandPathLabel(actionCommand),
+      durationMs: typeof startedAt === "number" ? Date.now() - startedAt : undefined,
+    },
+    actionCommand,
+  );
+});
 
 const account = program.command("account").description("Multi-account profile management");
 
@@ -1028,7 +1163,7 @@ auth
     wrapAction(async (file: string | undefined, command: Command) => {
       const profile = await currentProfile(command);
       const credentials = file
-        ? await parseCredentialFile(path.resolve(file))
+        ? await parseCredentialFile(path.resolve(normalizeMediaInput(file)))
         : toCredentials(
             (await loadCredentials(profile)) ??
               (() => {
@@ -1156,9 +1291,20 @@ msg
       ) => {
         const { api } = await requireApi(command);
 
-        const files = [file, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
+        const normalizedFile = file ? normalizeMediaInput(file) : undefined;
+        const files = [normalizedFile, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
         const urlInputs = files.filter((entry) => isHttpUrl(entry));
         const localInputs = files.filter((entry) => !isHttpUrl(entry));
+        writeDebugLine(
+          "msg.image.inputs",
+          {
+            threadId,
+            isGroup: Boolean(opts.group),
+            localInputs,
+            urlInputs,
+          },
+          command,
+        );
 
         const downloaded = await downloadUrlsToTempFiles(urlInputs);
         try {
@@ -1202,9 +1348,20 @@ msg
       ) => {
         const { api } = await requireApi(command);
 
-        const files = [file, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
+        const normalizedFile = file ? normalizeMediaInput(file) : undefined;
+        const files = [normalizedFile, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
         const urlInputs = files.filter((entry) => isHttpUrl(entry));
         const localInputs = files.filter((entry) => !isHttpUrl(entry));
+        writeDebugLine(
+          "msg.video.inputs",
+          {
+            threadId,
+            isGroup: Boolean(opts.group),
+            localInputs,
+            urlInputs,
+          },
+          command,
+        );
 
         const downloaded = await downloadUrlsToTempFiles(urlInputs);
         try {
@@ -1247,13 +1404,24 @@ msg
         const { api } = await requireApi(command);
         const type = asThreadType(opts.group);
 
-        const files = [file, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
+        const normalizedFile = file ? normalizeMediaInput(file) : undefined;
+        const files = [normalizedFile, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
         if (files.length === 0) {
           throw new Error("Provide a voice file or --url.");
         }
 
         const urlInputs = files.filter((entry) => isHttpUrl(entry));
         const localInputs = files.filter((entry) => !isHttpUrl(entry));
+        writeDebugLine(
+          "msg.voice.inputs",
+          {
+            threadId,
+            isGroup: Boolean(opts.group),
+            localInputs,
+            urlInputs,
+          },
+          command,
+        );
         const downloaded = await downloadUrlsToTempFiles(urlInputs);
         try {
           const attachments = [...localInputs, ...downloaded.files];
@@ -1495,7 +1663,18 @@ msg
         const localInputs = inputs.filter((entry) => !isHttpUrl(entry));
 
         const [threadId, file] = arg2 ? [arg2, arg1] : [arg1, undefined];
-        const localFiles = [file, ...localInputs].filter(Boolean) as string[];
+        const normalizedFile = file ? normalizeMediaInput(file) : undefined;
+        const localFiles = [normalizedFile, ...localInputs].filter(Boolean) as string[];
+        writeDebugLine(
+          "msg.upload.inputs",
+          {
+            threadId,
+            isGroup: Boolean(opts.group),
+            localFiles,
+            urlInputs,
+          },
+          command,
+        );
 
         const downloaded = await downloadUrlsToTempFiles(urlInputs);
         try {
@@ -1683,8 +1862,9 @@ group
   .action(
     wrapAction(async (groupId: string, file: string, command: Command) => {
       const { api } = await requireApi(command);
-      await assertFilesExist([file]);
-      const response = await api.changeGroupAvatar(file, groupId);
+      const normalizedFile = normalizeMediaInput(file);
+      await assertFilesExist([normalizedFile]);
+      const response = await api.changeGroupAvatar(normalizedFile, groupId);
       output(response, false);
     }),
   );
@@ -2321,8 +2501,9 @@ me
   .action(
     wrapAction(async (file: string, command: Command) => {
       const { api } = await requireApi(command);
-      await assertFilesExist([file]);
-      output(await api.changeAccountAvatar(file), false);
+      const normalizedFile = normalizeMediaInput(file);
+      await assertFilesExist([normalizedFile]);
+      output(await api.changeAccountAvatar(normalizedFile), false);
     }),
   );
 
@@ -2404,6 +2585,17 @@ program
       ) => {
         const { profile, api } = await requireApi(command);
         console.log("Listening... Press Ctrl+C to stop.");
+        writeDebugLine(
+          "listen.start",
+          {
+            profile,
+            mediaDir: resolveInboundMediaDir(profile),
+            maxMediaBytes: parseMaxInboundMediaBytes(),
+            maxMediaFiles: parseMaxInboundMediaFiles(),
+            includeMediaUrl: process.env.OPENZCA_LISTEN_INCLUDE_MEDIA_URL?.trim() ?? null,
+          },
+          command,
+        );
 
         async function emitWebhook(payload: Record<string, unknown>): Promise<void> {
           if (!opts.webhook) return;
@@ -2457,6 +2649,15 @@ program
             } catch (error) {
               console.error(
                 `Warning: failed to cache inbound media (${error instanceof Error ? error.message : String(error)})`,
+              );
+              writeDebugLine(
+                "listen.media.cache_error",
+                {
+                  profile,
+                  mediaUrl,
+                  message: error instanceof Error ? error.message : String(error),
+                },
+                command,
               );
             }
             mediaEntries.push({

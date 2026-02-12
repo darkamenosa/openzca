@@ -84,6 +84,34 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 | `openzca msg recent <threadId>` | List recent messages (`-n`, `--json`) |
 
 Media commands accept local files, `file://` paths, and repeatable `--url` options. Add `--group` for group threads.
+Local paths using `~` are expanded automatically (for positional file args, `--url`, and `OPENZCA_LISTEN_MEDIA_DIR`).
+
+### Debug Logging
+
+Use debug mode to write copyable logs for support/debugging:
+
+```bash
+# One-off debug run
+openzca --debug msg image <threadId> ~/Desktop/screenshot.png
+
+# Custom debug log path
+openzca --debug --debug-file ~/Desktop/openzca-debug.log msg image <threadId> ~/Desktop/screenshot.png
+
+# Or enable by environment
+OPENZCA_DEBUG=1 openzca listen --raw
+```
+
+Default debug log file:
+
+```text
+~/.openzca/logs/openzca-debug.log
+```
+
+Useful command to copy recent debug logs:
+
+```bash
+tail -n 200 ~/.openzca/logs/openzca-debug.log
+```
 
 ### group — Group management
 

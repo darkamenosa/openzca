@@ -21,19 +21,29 @@ export function collectValues(value: string, previous: string[]): string[] {
   return previous;
 }
 
+function expandLeadingTilde(value: string): string {
+  if (value === "~") {
+    return os.homedir();
+  }
+  if (value.startsWith("~/") || value.startsWith("~\\")) {
+    return path.join(os.homedir(), value.slice(2));
+  }
+  return value;
+}
+
 export function normalizeMediaInput(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
 
   if (/^file:\/\//i.test(trimmed)) {
     try {
-      return fileURLToPath(trimmed);
+      return expandLeadingTilde(fileURLToPath(trimmed));
     } catch {
-      return trimmed.replace(/^file:\/\//i, "");
+      return expandLeadingTilde(trimmed.replace(/^file:\/\//i, ""));
     }
   }
 
-  return trimmed;
+  return expandLeadingTilde(trimmed);
 }
 
 export function normalizeInputList(values?: string[]): string[] {
