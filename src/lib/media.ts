@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const CONTENT_TYPE_EXT: Record<string, string> = {
   "image/jpeg": ".jpg",
@@ -20,12 +21,31 @@ export function collectValues(value: string, previous: string[]): string[] {
   return previous;
 }
 
+export function normalizeMediaInput(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+
+  if (/^file:\/\//i.test(trimmed)) {
+    try {
+      return fileURLToPath(trimmed);
+    } catch {
+      return trimmed.replace(/^file:\/\//i, "");
+    }
+  }
+
+  return trimmed;
+}
+
 export function normalizeInputList(values?: string[]): string[] {
   if (!values || values.length === 0) return [];
   return values
     .flatMap((value) => value.split(","))
-    .map((value) => value.trim())
+    .map((value) => normalizeMediaInput(value))
     .filter(Boolean);
+}
+
+export function isHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
 }
 
 function inferExt(url: string, contentType: string | null): string {

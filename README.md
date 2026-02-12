@@ -71,7 +71,7 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 | `openzca msg send <threadId> <message>` | Send text message |
 | `openzca msg image <threadId> [file]` | Send image(s) from file or URL |
 | `openzca msg video <threadId> [file]` | Send video(s) from file or URL |
-| `openzca msg voice <threadId> [file]` | Send voice message |
+| `openzca msg voice <threadId> [file]` | Send voice message from local file or URL |
 | `openzca msg sticker <threadId> <stickerId>` | Send a sticker |
 | `openzca msg link <threadId> <url>` | Send a link |
 | `openzca msg card <threadId> <contactId>` | Send a contact card |
@@ -83,7 +83,7 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 | `openzca msg upload <arg1> [arg2]` | Upload and send file(s) |
 | `openzca msg recent <threadId>` | List recent messages (`-n`, `--json`) |
 
-Media commands accept local files and repeatable `--url` options. Add `--group` for group threads.
+Media commands accept local files, `file://` paths, and repeatable `--url` options. Add `--group` for group threads.
 
 ### group — Group management
 
@@ -159,6 +159,46 @@ Media commands accept local files and repeatable `--url` options. Add `--group` 
 | `openzca listen --webhook <url>` | POST message payload to a webhook URL |
 | `openzca listen --raw` | Output raw JSON per line |
 | `openzca listen --keep-alive` | Auto-reconnect on disconnect |
+
+`listen --raw` now includes inbound media metadata when available:
+
+- `mediaPath`, `mediaPaths`
+- `mediaUrl`, `mediaUrls`
+- `mediaType`, `mediaTypes`
+- `mediaKind`
+
+For non-text inbound messages (image/video/audio/file), `content` is emitted as a media note:
+
+```text
+[media attached: /abs/path/to/file.ext (mime/type) | https://source-url]
+```
+
+or for multiple attachments:
+
+```text
+[media attached: 2 files]
+[media attached 1/2: /abs/path/one.png (image/png) | https://...]
+[media attached 2/2: /abs/path/two.pdf (application/pdf) | https://...]
+```
+
+This format is compatible with OpenClaw media parsing.
+
+### Listen Media Defaults (Zero Config)
+
+By default, inbound media downloaded by `listen` is stored under OpenClaw state:
+
+```text
+~/.openclaw/media/openzca/<profile>/inbound
+```
+
+If `OPENCLAW_STATE_DIR` (or `CLAWDBOT_STATE_DIR`) is set, that directory is used instead of `~/.openclaw`.
+
+Optional overrides:
+
+- `OPENZCA_LISTEN_MEDIA_DIR`: explicit inbound media cache directory
+- `OPENZCA_LISTEN_MEDIA_MAX_BYTES`: max bytes per inbound media file (default `20971520`, 20MB)
+- `OPENZCA_LISTEN_MEDIA_MAX_FILES`: max inbound media files extracted per message (default `4`, max `16`)
+- `OPENZCA_LISTEN_MEDIA_LEGACY_DIR=1`: use legacy storage at `~/.openzca/profiles/<profile>/inbound-media`
 
 ### account — Multi-account profiles
 

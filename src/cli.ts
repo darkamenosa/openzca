@@ -26,6 +26,7 @@ import {
   clearCredentials,
   ensureProfile,
   getCredentialsPath,
+  getProfileDir,
   listProfiles,
   loadCredentials,
   readCache,
@@ -46,6 +47,7 @@ import {
   assertFilesExist,
   collectValues,
   downloadUrlsToTempFiles,
+  isHttpUrl,
   normalizeInputList,
 } from "./lib/media.js";
 
@@ -462,6 +464,324 @@ function getStringCandidate(record: Record<string, unknown>, keys: string[]): st
   return "";
 }
 
+type InboundMediaKind = "image" | "video" | "audio" | "file";
+
+function normalizeMessageType(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.trim().toLowerCase();
+}
+
+function detectInboundMediaKind(msgType: unknown, content: unknown): InboundMediaKind | null {
+  const normalizedType = normalizeMessageType(msgType);
+
+  if (
+    normalizedType.includes("photo") ||
+    normalizedType.includes("gif") ||
+    normalizedType.includes("sticker")
+  ) {
+    return "image";
+  }
+  if (normalizedType.includes("video")) return "video";
+  if (normalizedType.includes("voice") || normalizedType.includes("audio")) return "audio";
+  if (normalizedType.includes("share.file")) return "file";
+  if (normalizedType.includes("link") || normalizedType.includes("location")) return null;
+
+  const record = asObject(content);
+  if (!record) return null;
+
+  if (getStringCandidate(record, ["voiceUrl", "m4aUrl"])) return "audio";
+  if (getStringCandidate(record, ["videoUrl"])) return "video";
+  if (
+    getStringCandidate(record, [
+      "hdUrl",
+      "normalUrl",
+      "thumbUrl",
+      "thumb",
+      "rawUrl",
+      "oriUrl",
+      "imageUrl",
+    ])
+  ) {
+    return "image";
+  }
+  if (getStringCandidate(record, ["fileUrl", "fileName", "fileId"])) return "file";
+
+  return null;
+}
+
+function collectHttpUrls(value: unknown, sink: Set<string>, depth = 0): void {
+  if (depth > 5 || sink.size >= 16) return;
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (isHttpUrl(trimmed)) {
+      sink.add(trimmed);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectHttpUrls(item, sink, depth + 1);
+      if (sink.size >= 16) return;
+    }
+    return;
+  }
+
+  const record = asObject(value);
+  if (!record) return;
+  for (const nested of Object.values(record)) {
+    collectHttpUrls(nested, sink, depth + 1);
+    if (sink.size >= 16) return;
+  }
+}
+
+function preferredMediaKeys(kind: InboundMediaKind): string[] {
+  switch (kind) {
+    case "image":
+      return [
+        "hdUrl",
+        "normalUrl",
+        "rawUrl",
+        "oriUrl",
+        "imageUrl",
+        "thumbUrl",
+        "thumb",
+        "href",
+        "url",
+        "src",
+      ];
+    case "video":
+      return ["videoUrl", "fileUrl", "href", "url", "src"];
+    case "audio":
+      return ["voiceUrl", "m4aUrl", "audioUrl", "fileUrl", "href", "url", "src"];
+    case "file":
+      return ["fileUrl", "href", "url", "src"];
+  }
+}
+
+function resolvePreferredMediaUrls(kind: InboundMediaKind, content: unknown): string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const push = (url: string) => {
+    if (!seen.has(url)) {
+      seen.add(url);
+      ordered.push(url);
+    }
+  };
+
+  const record = asObject(content);
+  if (record) {
+    for (const key of preferredMediaKeys(kind)) {
+      if (!(key in record)) continue;
+      const urls = new Set<string>();
+      collectHttpUrls(record[key], urls);
+      for (const url of urls) {
+        push(url);
+      }
+    }
+  }
+
+  const collected = new Set<string>();
+  collectHttpUrls(content, collected);
+  for (const url of collected) {
+    push(url);
+  }
+  return ordered;
+}
+
+function mediaExtFromTypeOrUrl(
+  mediaType: string | null,
+  mediaUrl: string,
+  kind: InboundMediaKind,
+): string {
+  const normalizedType = mediaType?.split(";")[0]?.trim().toLowerCase() ?? "";
+  const byType: Record<string, string> = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "video/mp4": ".mp4",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/wav": ".wav",
+    "audio/ogg": ".ogg",
+    "application/pdf": ".pdf",
+    "text/plain": ".txt",
+    "text/csv": ".csv",
+    "application/json": ".json",
+    "application/zip": ".zip",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-powerpoint": ".ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+  };
+  const fromType = byType[normalizedType];
+  if (fromType) return fromType;
+
+  try {
+    const parsedUrl = new URL(mediaUrl);
+    const ext = path.extname(parsedUrl.pathname);
+    if (ext) return ext;
+  } catch {
+    // ignore
+  }
+
+  if (kind === "video") return ".mp4";
+  if (kind === "audio") return ".m4a";
+  if (kind === "image") return ".jpg";
+  return ".bin";
+}
+
+function parseMaxInboundMediaBytes(): number {
+  const raw = process.env.OPENZCA_LISTEN_MEDIA_MAX_BYTES?.trim();
+  if (!raw) return 20 * 1024 * 1024;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 20 * 1024 * 1024;
+  return Math.trunc(parsed);
+}
+
+function parseMaxInboundMediaFiles(): number {
+  const raw = process.env.OPENZCA_LISTEN_MEDIA_MAX_FILES?.trim();
+  if (!raw) return 4;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 4;
+  return Math.min(Math.max(Math.trunc(parsed), 1), 16);
+}
+
+function resolveOpenClawMediaDir(): string {
+  const stateDir =
+    process.env.OPENCLAW_STATE_DIR?.trim() ||
+    process.env.CLAWDBOT_STATE_DIR?.trim() ||
+    path.join(os.homedir(), ".openclaw");
+  return path.join(stateDir, "media");
+}
+
+function resolveInboundMediaDir(profile: string): string {
+  const configured = process.env.OPENZCA_LISTEN_MEDIA_DIR?.trim();
+  if (configured) {
+    return path.isAbsolute(configured) ? configured : path.resolve(process.cwd(), configured);
+  }
+  const legacyRequested = process.env.OPENZCA_LISTEN_MEDIA_LEGACY_DIR?.trim() === "1";
+  if (legacyRequested) {
+    return path.join(getProfileDir(profile), "inbound-media");
+  }
+  return path.join(resolveOpenClawMediaDir(), "openzca", profile, "inbound");
+}
+
+async function cacheInboundMediaToProfile(
+  profile: string,
+  mediaUrl: string,
+  kind: InboundMediaKind,
+): Promise<{ mediaPath: string; mediaType: string | null } | null> {
+  const maxBytes = parseMaxInboundMediaBytes();
+  const response = await fetch(mediaUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to download inbound media: ${mediaUrl} (${response.status})`);
+  }
+
+  const mediaType = response.headers.get("content-type");
+  const contentLengthRaw = response.headers.get("content-length");
+  const contentLength = contentLengthRaw ? Number(contentLengthRaw) : Number.NaN;
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    return null;
+  }
+
+  const data = Buffer.from(await response.arrayBuffer());
+  if (data.length === 0 || data.length > maxBytes) {
+    return null;
+  }
+
+  const dir = resolveInboundMediaDir(profile);
+  await fs.mkdir(dir, { recursive: true });
+
+  const ext = mediaExtFromTypeOrUrl(mediaType, mediaUrl, kind);
+  const id = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  const mediaPath = path.join(dir, `${id}${ext}`);
+  await fs.writeFile(mediaPath, data);
+
+  return { mediaPath, mediaType };
+}
+
+function summarizeStructuredContent(msgType: unknown, content: unknown): string {
+  const normalizedType = normalizeMessageType(msgType);
+  const record = asObject(content);
+
+  if (normalizedType.includes("link") && record) {
+    const href = getStringCandidate(record, ["href", "url", "src"]);
+    if (href) return href;
+  }
+
+  if (record) {
+    const candidateText = getStringCandidate(record, [
+      "msg",
+      "message",
+      "text",
+      "title",
+      "description",
+      "href",
+      "url",
+      "src",
+    ]);
+    if (candidateText) return candidateText;
+  }
+
+  return normalizedType ? `<non-text:${normalizedType}>` : "<non-text-message>";
+}
+
+function buildMediaAttachedText(params: {
+  mediaEntries: Array<{ mediaPath?: string; mediaUrl?: string; mediaType?: string | null }>;
+  fallbackKind?: InboundMediaKind | null;
+  caption?: string;
+}): string {
+  const entries = params.mediaEntries
+    .map((entry) => ({
+      pathOrUrl: entry.mediaPath ?? entry.mediaUrl,
+      mediaPath: entry.mediaPath,
+      mediaUrl: entry.mediaUrl,
+      mediaType: entry.mediaType,
+    }))
+    .filter((entry) => Boolean(entry.pathOrUrl));
+  if (entries.length === 0) {
+    return params.caption?.trim() || "";
+  }
+
+  const fallbackType =
+    params.fallbackKind === "image"
+      ? "image/*"
+      : params.fallbackKind === "video"
+        ? "video/*"
+        : params.fallbackKind === "audio"
+          ? "audio/*"
+          : undefined;
+  const multiple = entries.length > 1;
+  const lines: string[] = [];
+  if (multiple) {
+    lines.push(`[media attached: ${entries.length} files]`);
+  }
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const type = entry.mediaType?.trim() || fallbackType;
+    const typePart = type ? ` (${type})` : "";
+    const urlPart = entry.mediaPath && entry.mediaUrl ? ` | ${entry.mediaUrl}` : "";
+    const prefix = multiple
+      ? `[media attached ${index + 1}/${entries.length}: `
+      : "[media attached: ";
+    lines.push(`${prefix}${entry.pathOrUrl}${typePart}${urlPart}]`);
+  }
+  const mediaNote = lines.join("\n");
+
+  if (params.caption?.trim()) {
+    return `${mediaNote}\n${params.caption.trim()}`;
+  }
+
+  return mediaNote;
+}
+
 function normalizeFriendLookupRows(value: unknown): Record<string, unknown>[] {
   const queue: unknown[] = [value];
   const rows: Record<string, unknown>[] = [];
@@ -837,8 +1157,8 @@ msg
         const { api } = await requireApi(command);
 
         const files = [file, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
-        const urlInputs = files.filter((entry) => /^https?:\/\//i.test(entry));
-        const localInputs = files.filter((entry) => !/^https?:\/\//i.test(entry));
+        const urlInputs = files.filter((entry) => isHttpUrl(entry));
+        const localInputs = files.filter((entry) => !isHttpUrl(entry));
 
         const downloaded = await downloadUrlsToTempFiles(urlInputs);
         try {
@@ -883,8 +1203,8 @@ msg
         const { api } = await requireApi(command);
 
         const files = [file, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
-        const urlInputs = files.filter((entry) => /^https?:\/\//i.test(entry));
-        const localInputs = files.filter((entry) => !/^https?:\/\//i.test(entry));
+        const urlInputs = files.filter((entry) => isHttpUrl(entry));
+        const localInputs = files.filter((entry) => !isHttpUrl(entry));
 
         const downloaded = await downloadUrlsToTempFiles(urlInputs);
         try {
@@ -927,30 +1247,36 @@ msg
         const { api } = await requireApi(command);
         const type = asThreadType(opts.group);
 
-        const urls = normalizeInputList(opts.url);
-        const localFiles = [file].filter(Boolean) as string[];
-
-        if (urls.length === 0 && localFiles.length === 0) {
+        const files = [file, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
+        if (files.length === 0) {
           throw new Error("Provide a voice file or --url.");
         }
 
-        const results: unknown[] = [];
+        const urlInputs = files.filter((entry) => isHttpUrl(entry));
+        const localInputs = files.filter((entry) => !isHttpUrl(entry));
+        const downloaded = await downloadUrlsToTempFiles(urlInputs);
+        try {
+          const attachments = [...localInputs, ...downloaded.files];
+          await assertFilesExist(attachments);
 
-        for (const voiceUrl of urls) {
-          results.push(await api.sendVoice({ voiceUrl }, threadId, type));
-        }
-
-        if (localFiles.length > 0) {
-          await assertFilesExist(localFiles);
-          const uploaded = await api.uploadAttachment(localFiles, threadId, type);
+          const results: unknown[] = [];
+          const uploaded = await api.uploadAttachment(attachments, threadId, type);
           for (const item of uploaded) {
             if (item.fileType === "others" || item.fileType === "video") {
               results.push(await api.sendVoice({ voiceUrl: item.fileUrl }, threadId, type));
             }
           }
-        }
 
-        output(results, false);
+          if (results.length === 0) {
+            throw new Error(
+              "No valid voice attachment generated. Use an audio file (e.g. .mp3, .m4a, .wav, .ogg).",
+            );
+          }
+
+          output(results, false);
+        } finally {
+          await downloaded.cleanup();
+        }
       },
     ),
   );
@@ -1164,12 +1490,14 @@ msg
         command: Command,
       ) => {
         const { api } = await requireApi(command);
-        const urls = normalizeInputList(opts.url);
+        const inputs = normalizeInputList(opts.url);
+        const urlInputs = inputs.filter((entry) => isHttpUrl(entry));
+        const localInputs = inputs.filter((entry) => !isHttpUrl(entry));
 
         const [threadId, file] = arg2 ? [arg2, arg1] : [arg1, undefined];
-        const localFiles = [file].filter(Boolean) as string[];
+        const localFiles = [file, ...localInputs].filter(Boolean) as string[];
 
-        const downloaded = await downloadUrlsToTempFiles(urls);
+        const downloaded = await downloadUrlsToTempFiles(urlInputs);
         try {
           const attachments = [...localFiles, ...downloaded.files];
           if (attachments.length === 0) {
@@ -2074,7 +2402,7 @@ program
         },
         command: Command,
       ) => {
-        const { api } = await requireApi(command);
+        const { profile, api } = await requireApi(command);
         console.log("Listening... Press Ctrl+C to stop.");
 
         async function emitWebhook(payload: Record<string, unknown>): Promise<void> {
@@ -2102,18 +2430,85 @@ program
         });
 
         api.listener.on("message", async (message) => {
-          const content = message.data.content;
-          const text = typeof content === "string" ? content : null;
-          if (!text) return;
+          const messageData = message.data as Record<string, unknown>;
+          const rawContent = messageData.content;
+          const msgType = getStringCandidate(messageData, ["msgType"]);
+          const rawText = typeof rawContent === "string" ? rawContent : "";
 
-          let processedText = text;
+          const mediaKind = detectInboundMediaKind(msgType, rawContent);
+          const maxMediaFiles = parseMaxInboundMediaFiles();
+          const remoteMediaUrls =
+            mediaKind && maxMediaFiles > 0
+              ? resolvePreferredMediaUrls(mediaKind, rawContent).slice(0, maxMediaFiles)
+              : [];
+
+          const mediaEntries: Array<{ mediaPath?: string; mediaUrl?: string; mediaType?: string }> = [];
+          for (const mediaUrl of remoteMediaUrls) {
+            let mediaPath: string | undefined;
+            let mediaType: string | null = null;
+            try {
+              if (mediaKind) {
+                const cached = await cacheInboundMediaToProfile(profile, mediaUrl, mediaKind);
+                if (cached) {
+                  mediaPath = cached.mediaPath;
+                  mediaType = cached.mediaType;
+                }
+              }
+            } catch (error) {
+              console.error(
+                `Warning: failed to cache inbound media (${error instanceof Error ? error.message : String(error)})`,
+              );
+            }
+            mediaEntries.push({
+              mediaPath,
+              mediaUrl,
+              mediaType: mediaType ?? undefined,
+            });
+          }
+
+          const localEntries = mediaEntries.filter((entry) => Boolean(entry.mediaPath));
+          const mediaPaths = localEntries.map((entry) => entry.mediaPath as string);
+          const mediaUrls =
+            localEntries.length > 0
+              ? localEntries
+                  .map((entry) => entry.mediaUrl)
+                  .filter((value): value is string => Boolean(value))
+              : mediaEntries
+                  .map((entry) => entry.mediaUrl)
+                  .filter((value): value is string => Boolean(value));
+          const mediaTypes =
+            localEntries.length > 0
+              ? localEntries
+                  .map((entry) => entry.mediaType)
+                  .filter((value): value is string => Boolean(value))
+              : mediaEntries
+                  .map((entry) => entry.mediaType)
+                  .filter((value): value is string => Boolean(value));
+
+          const mediaPath = mediaPaths[0];
+          const mediaUrl = mediaUrls[0];
+          const mediaType = mediaTypes[0];
+
+          const caption =
+            rawText.trim().length > 0 ? rawText.trim() : summarizeStructuredContent(msgType, rawContent);
+          let processedText = mediaEntries.length
+            ? buildMediaAttachedText({
+                mediaEntries,
+                fallbackKind: mediaKind,
+                caption,
+              })
+            : rawText.trim().length > 0
+              ? rawText
+              : summarizeStructuredContent(msgType, rawContent);
+
+          if (!processedText.trim()) return;
+
           if (opts.prefix) {
             if (!processedText.startsWith(opts.prefix)) return;
             processedText = processedText.slice(opts.prefix.length).trimStart();
           }
 
           const chatType = message.type === ThreadType.Group ? "group" : "user";
-          const messageData = message.data as Record<string, unknown>;
           const threadName =
             typeof messageData.threadName === "string"
               ? messageData.threadName
@@ -2128,11 +2523,26 @@ program
             content: processedText,
             type: message.type,
             timestamp: toEpochSeconds(message.data.ts),
+            msgType: msgType || undefined,
+            mediaPath,
+            mediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
+            mediaUrl,
+            mediaUrls: mediaUrls.length > 0 ? mediaUrls : undefined,
+            mediaType,
+            mediaTypes: mediaTypes.length > 0 ? mediaTypes : undefined,
+            mediaKind: mediaKind ?? undefined,
             metadata: {
               isGroup: message.type === ThreadType.Group,
               threadName,
               senderName: message.data.dName,
               fromId: message.data.uidFrom,
+              mediaPath,
+              mediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
+              mediaUrl,
+              mediaUrls: mediaUrls.length > 0 ? mediaUrls : undefined,
+              mediaType,
+              mediaTypes: mediaTypes.length > 0 ? mediaTypes : undefined,
+              mediaKind: mediaKind ?? undefined,
             },
             // Backward-compatible convenience fields.
             chatType,
@@ -2151,7 +2561,7 @@ program
 
           await emitWebhook(payload);
 
-          if (opts.echo) {
+          if (opts.echo && rawText.trim().length > 0) {
             try {
               await api.sendMessage(
                 { msg: processedText },

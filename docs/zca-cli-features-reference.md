@@ -134,6 +134,17 @@ Command groups:
 ## Listen Command
 - `openzca listen [--echo] [--prefix <text>] [--webhook <url>] [--raw] [--keep-alive]`
 
+Listener media behavior (openzca additions):
+- Non-text inbound messages can be normalized into media note text in `content`.
+- `--raw` payload may include:
+  - `mediaPath`, `mediaPaths`
+  - `mediaUrl`, `mediaUrls`
+  - `mediaType`, `mediaTypes`
+  - `mediaKind`
+- Default inbound media cache path is under OpenClaw state dir:
+  - `~/.openclaw/media/openzca/<profile>/inbound`
+  - or `${OPENCLAW_STATE_DIR}/media/openzca/<profile>/inbound`
+
 ## Basic Usage Flow
 ```bash
 # 1) Login
