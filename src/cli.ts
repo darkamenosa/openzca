@@ -570,6 +570,50 @@ function normalizeMessageType(value: unknown): string {
   return value.trim().toLowerCase();
 }
 
+function looksLikeStructuredJsonString(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length < 2) return false;
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  if (first === "{" && last === "}") return true;
+  if (first === "[" && last === "]") return true;
+  return false;
+}
+
+function normalizeStructuredContent(value: unknown, depth = 0): unknown {
+  if (depth > 5 || value === null || value === undefined) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!looksLikeStructuredJsonString(trimmed)) {
+      return value;
+    }
+    try {
+      const parsed = JSON.parse(trimmed);
+      return normalizeStructuredContent(parsed, depth + 1);
+    } catch {
+      return value;
+    }
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeStructuredContent(entry, depth + 1));
+  }
+
+  const record = asObject(value);
+  if (!record) {
+    return value;
+  }
+
+  const normalized: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(record)) {
+    normalized[key] = normalizeStructuredContent(nested, depth + 1);
+  }
+  return normalized;
+}
+
 function detectInboundMediaKind(msgType: unknown, content: unknown): InboundMediaKind | null {
   const normalizedType = normalizeMessageType(msgType);
 
@@ -588,7 +632,9 @@ function detectInboundMediaKind(msgType: unknown, content: unknown): InboundMedi
   const record = asObject(content);
   if (!record) return null;
 
-  if (getStringCandidate(record, ["voiceUrl", "m4aUrl"])) return "audio";
+  if (getStringCandidate(record, ["voiceUrl", "m4aUrl", "audioUrl", "voice_url", "m4a_url", "audio_url"])) {
+    return "audio";
+  }
   if (getStringCandidate(record, ["videoUrl"])) return "video";
   if (
     getStringCandidate(record, [
@@ -603,7 +649,7 @@ function detectInboundMediaKind(msgType: unknown, content: unknown): InboundMedi
   ) {
     return "image";
   }
-  if (getStringCandidate(record, ["fileUrl", "fileName", "fileId"])) return "file";
+  if (getStringCandidate(record, ["fileUrl", "fileName", "fileId", "href", "url"])) return "file";
 
   return null;
 }
@@ -612,9 +658,16 @@ function collectHttpUrls(value: unknown, sink: Set<string>, depth = 0): void {
   if (depth > 5 || sink.size >= 16) return;
 
   if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (isHttpUrl(trimmed)) {
-      sink.add(trimmed);
+    const escapedNormalized = value.replace(/\\\//g, "/");
+    const matches = escapedNormalized.match(/https?:\/\/[^\s"'<>`]+/gi) ?? [];
+    for (const match of matches) {
+      const cleaned = match.replace(/[)\],.;"'`]+$/g, "").trim();
+      if (isHttpUrl(cleaned)) {
+        sink.add(cleaned);
+      }
+      if (sink.size >= 16) {
+        return;
+      }
     }
     return;
   }
@@ -644,6 +697,8 @@ function preferredMediaKeys(kind: InboundMediaKind): string[] {
         "rawUrl",
         "oriUrl",
         "imageUrl",
+        "photoUrl",
+        "fileUrl",
         "thumbUrl",
         "thumb",
         "href",
@@ -651,11 +706,48 @@ function preferredMediaKeys(kind: InboundMediaKind): string[] {
         "src",
       ];
     case "video":
-      return ["videoUrl", "fileUrl", "href", "url", "src"];
+      return [
+        "videoUrl",
+        "video_url",
+        "mediaUrl",
+        "streamUrl",
+        "playUrl",
+        "fileUrl",
+        "rawUrl",
+        "href",
+        "url",
+        "src",
+      ];
     case "audio":
-      return ["voiceUrl", "m4aUrl", "audioUrl", "fileUrl", "href", "url", "src"];
+      return [
+        "voiceUrl",
+        "m4aUrl",
+        "audioUrl",
+        "voice_url",
+        "m4a_url",
+        "audio_url",
+        "mediaUrl",
+        "downloadUrl",
+        "streamUrl",
+        "playUrl",
+        "fileUrl",
+        "rawUrl",
+        "href",
+        "url",
+        "src",
+      ];
     case "file":
-      return ["fileUrl", "href", "url", "src"];
+      return [
+        "fileUrl",
+        "downloadUrl",
+        "rawUrl",
+        "normalUrl",
+        "oriUrl",
+        "fileLink",
+        "href",
+        "url",
+        "src",
+      ];
   }
 }
 
@@ -697,27 +789,49 @@ function mediaExtFromTypeOrUrl(
   const normalizedType = mediaType?.split(";")[0]?.trim().toLowerCase() ?? "";
   const byType: Record<string, string> = {
     "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
     "image/png": ".png",
     "image/webp": ".webp",
     "image/gif": ".gif",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
     "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
     "audio/mpeg": ".mp3",
     "audio/mp3": ".mp3",
+    "audio/aac": ".aac",
+    "audio/x-aac": ".aac",
     "audio/mp4": ".m4a",
     "audio/x-m4a": ".m4a",
     "audio/wav": ".wav",
     "audio/ogg": ".ogg",
+    "audio/webm": ".webm",
     "application/pdf": ".pdf",
     "text/plain": ".txt",
+    "text/markdown": ".md",
     "text/csv": ".csv",
+    "text/tab-separated-values": ".tsv",
     "application/json": ".json",
+    "application/xml": ".xml",
+    "text/xml": ".xml",
     "application/zip": ".zip",
+    "application/gzip": ".gz",
+    "application/x-tar": ".tar",
+    "application/x-7z-compressed": ".7z",
+    "application/vnd.rar": ".rar",
     "application/vnd.ms-excel": ".xls",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-excel.sheet.binary.macroenabled.12": ".xlsb",
+    "application/vnd.ms-excel.sheet.macroenabled.12": ".xlsm",
     "application/msword": ".doc",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     "application/vnd.ms-powerpoint": ".ppt",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/rtf": ".rtf",
+    "application/vnd.oasis.opendocument.text": ".odt",
+    "application/vnd.oasis.opendocument.spreadsheet": ".ods",
+    "application/vnd.oasis.opendocument.presentation": ".odp",
   };
   const fromType = byType[normalizedType];
   if (fromType) return fromType;
@@ -821,8 +935,11 @@ function summarizeStructuredContent(msgType: unknown, content: unknown): string 
       "msg",
       "message",
       "text",
+      "caption",
       "title",
       "description",
+      "fileName",
+      "name",
       "href",
       "url",
       "src",
@@ -1437,7 +1554,7 @@ msg
 
           if (results.length === 0) {
             throw new Error(
-              "No valid voice attachment generated. Use an audio file (e.g. .mp3, .m4a, .wav, .ogg).",
+              "No valid voice attachment generated. Use an audio file (e.g. .aac, .mp3, .m4a, .wav, .ogg).",
             );
           }
 
@@ -2625,14 +2742,28 @@ program
           const messageData = message.data as Record<string, unknown>;
           const rawContent = messageData.content;
           const msgType = getStringCandidate(messageData, ["msgType"]);
+          const parsedContent = normalizeStructuredContent(rawContent);
+          const hasParsedStructuredContent = parsedContent !== rawContent;
           const rawText = typeof rawContent === "string" ? rawContent : "";
 
-          const mediaKind = detectInboundMediaKind(msgType, rawContent);
+          const mediaKind = detectInboundMediaKind(msgType, parsedContent);
           const maxMediaFiles = parseMaxInboundMediaFiles();
           const remoteMediaUrls =
             mediaKind && maxMediaFiles > 0
-              ? resolvePreferredMediaUrls(mediaKind, rawContent).slice(0, maxMediaFiles)
+              ? resolvePreferredMediaUrls(mediaKind, parsedContent).slice(0, maxMediaFiles)
               : [];
+          writeDebugLine(
+            "listen.media.detected",
+            {
+              profile,
+              threadId: message.threadId,
+              msgType: msgType || undefined,
+              mediaKind,
+              hasParsedStructuredContent,
+              remoteMediaUrls,
+            },
+            command,
+          );
 
           const mediaEntries: Array<{ mediaPath?: string; mediaUrl?: string; mediaType?: string }> = [];
           for (const mediaUrl of remoteMediaUrls) {
@@ -2691,16 +2822,18 @@ program
           const mediaType = mediaTypes[0];
 
           const caption =
-            rawText.trim().length > 0 ? rawText.trim() : summarizeStructuredContent(msgType, rawContent);
+            rawText.trim().length > 0 && !hasParsedStructuredContent
+              ? rawText.trim()
+              : summarizeStructuredContent(msgType, parsedContent);
           let processedText = mediaEntries.length
             ? buildMediaAttachedText({
                 mediaEntries,
                 fallbackKind: mediaKind,
                 caption,
               })
-            : rawText.trim().length > 0
+            : rawText.trim().length > 0 && !hasParsedStructuredContent
               ? rawText
-              : summarizeStructuredContent(msgType, rawContent);
+              : summarizeStructuredContent(msgType, parsedContent);
 
           if (!processedText.trim()) return;
 

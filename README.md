@@ -71,7 +71,7 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 | `openzca msg send <threadId> <message>` | Send text message |
 | `openzca msg image <threadId> [file]` | Send image(s) from file or URL |
 | `openzca msg video <threadId> [file]` | Send video(s) from file or URL |
-| `openzca msg voice <threadId> [file]` | Send voice message from local file or URL |
+| `openzca msg voice <threadId> [file]` | Send voice message from local file or URL (`.aac`, `.mp3`, `.m4a`, `.wav`, `.ogg`) |
 | `openzca msg sticker <threadId> <stickerId>` | Send a sticker |
 | `openzca msg link <threadId> <url>` | Send a link |
 | `openzca msg card <threadId> <contactId>` | Send a contact card |
@@ -112,6 +112,11 @@ Useful command to copy recent debug logs:
 ```bash
 tail -n 200 ~/.openzca/logs/openzca-debug.log
 ```
+
+For media debugging, grep these events in the debug log:
+
+- `listen.media.detected`
+- `listen.media.cache_error`
 
 ### group — Group management
 
@@ -188,12 +193,14 @@ tail -n 200 ~/.openzca/logs/openzca-debug.log
 | `openzca listen --raw` | Output raw JSON per line |
 | `openzca listen --keep-alive` | Auto-reconnect on disconnect |
 
-`listen --raw` now includes inbound media metadata when available:
+`listen --raw` includes inbound media metadata when available:
 
 - `mediaPath`, `mediaPaths`
 - `mediaUrl`, `mediaUrls`
 - `mediaType`, `mediaTypes`
 - `mediaKind`
+
+`listen` also normalizes JSON-string message payloads (common for `chat.voice` and `share.file`) so media URLs are extracted/cached instead of being forwarded as raw JSON text.
 
 For non-text inbound messages (image/video/audio/file), `content` is emitted as a media note:
 
