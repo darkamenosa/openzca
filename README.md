@@ -207,8 +207,20 @@ It also includes stable routing fields for downstream tools:
 - `threadId`, `targetId`, `conversationId`
 - `senderId`, `toId`, `chatType`, `msgType`, `timestamp`
 - `metadata.threadId`, `metadata.targetId`, `metadata.senderId`, `metadata.toId`
+- `quote` and `metadata.quote` when the inbound message is a reply to a previous message
+  - Includes parsed `quote.attach` and extracted `quote.mediaUrls` when attachment URLs are present.
+- `quoteMediaPath`, `quoteMediaPaths`, `quoteMediaUrl`, `quoteMediaUrls`, `quoteMediaType`, `quoteMediaTypes`
+  - Present when quoted attachment URLs can be resolved/downloaded.
 
 For direct messages, `metadata.senderName` is intentionally omitted so consumers can prefer numeric IDs for routing instead of display-name targets.
+
+When a reply/quoted message is detected, `content` also appends a compact line:
+
+```text
+[reply context: <sender-or-owner-id>: <quoted summary>]
+```
+
+This helps downstream consumers that only read `content` (without parsing `quote`) still see reply context.
 
 `listen` also normalizes JSON-string message payloads (common for `chat.voice` and `share.file`) so media URLs are extracted/cached instead of being forwarded as raw JSON text.
 
@@ -243,6 +255,8 @@ Optional overrides:
 - `OPENZCA_LISTEN_MEDIA_DIR`: explicit inbound media cache directory
 - `OPENZCA_LISTEN_MEDIA_MAX_BYTES`: max bytes per inbound media file (default `20971520`, 20MB)
 - `OPENZCA_LISTEN_MEDIA_MAX_FILES`: max inbound media files extracted per message (default `4`, max `16`)
+- `OPENZCA_LISTEN_MEDIA_FETCH_TIMEOUT_MS`: max download time per inbound media URL (default `10000`)
+  - Set to `0` to disable timeout.
 - `OPENZCA_LISTEN_MEDIA_LEGACY_DIR=1`: use legacy storage at `~/.openzca/profiles/<profile>/inbound-media`
 
 Listener resilience override:
@@ -254,6 +268,12 @@ Listener resilience override:
 - `OPENZCA_LISTEN_HEARTBEAT_MS`: heartbeat interval for `listen --supervised --raw` lifecycle events.
   - Default: `30000` (30 seconds).
   - Set to `0` to disable heartbeat events.
+- `OPENZCA_LISTEN_INCLUDE_QUOTE_CONTEXT`: include reply context/quoted-media helper lines in `content`.
+  - Default: enabled.
+  - Set to `0` to disable.
+- `OPENZCA_LISTEN_DOWNLOAD_QUOTE_MEDIA`: download quoted attachment URLs (if present) into inbound media cache.
+  - Default: enabled.
+  - Set to `0` to keep only quote metadata/URLs without downloading.
 
 Supervised mode notes:
 

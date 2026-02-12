@@ -866,6 +866,14 @@ function parseMaxInboundMediaFiles(): number {
   return Math.min(Math.max(Math.trunc(parsed), 1), 16);
 }
 
+function parseInboundMediaFetchTimeoutMs(): number {
+  const raw = process.env.OPENZCA_LISTEN_MEDIA_FETCH_TIMEOUT_MS?.trim();
+  if (!raw) return 10_000;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return 10_000;
+  return Math.trunc(parsed);
+}
+
 function resolveOpenClawMediaDir(): string {
   const stateDir =
     process.env.OPENCLAW_STATE_DIR?.trim() ||
@@ -893,7 +901,23 @@ async function cacheInboundMediaToProfile(
   kind: InboundMediaKind,
 ): Promise<{ mediaPath: string; mediaType: string | null } | null> {
   const maxBytes = parseMaxInboundMediaBytes();
-  const response = await fetch(mediaUrl);
+  const timeoutMs = parseInboundMediaFetchTimeoutMs();
+  const controller = timeoutMs > 0 ? new AbortController() : undefined;
+  const timeoutId =
+    controller && timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let response: Response;
+  try {
+    response = await fetch(mediaUrl, controller ? { signal: controller.signal } : undefined);
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Timed out downloading inbound media: ${mediaUrl} (${timeoutMs}ms)`);
+    }
+    throw error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
   if (!response.ok) {
     throw new Error(`Failed to download inbound media: ${mediaUrl} (${response.status})`);
   }
@@ -919,6 +943,51 @@ async function cacheInboundMediaToProfile(
   await fs.writeFile(mediaPath, data);
 
   return { mediaPath, mediaType };
+}
+
+async function cacheRemoteMediaEntries(params: {
+  profile: string;
+  urls: string[];
+  kind: InboundMediaKind;
+  command: Command;
+  warningLabel: string;
+  debugErrorEvent: string;
+  debugUrlKey: string;
+}): Promise<Array<{ mediaPath?: string; mediaUrl?: string; mediaType?: string }>> {
+  if (params.urls.length === 0) return [];
+
+  return Promise.all(
+    params.urls.map(async (mediaUrl) => {
+      let mediaPath: string | undefined;
+      let mediaType: string | null = null;
+      try {
+        const cached = await cacheInboundMediaToProfile(params.profile, mediaUrl, params.kind);
+        if (cached) {
+          mediaPath = cached.mediaPath;
+          mediaType = cached.mediaType;
+        }
+      } catch (error) {
+        console.error(
+          `Warning: failed to cache ${params.warningLabel} (${error instanceof Error ? error.message : String(error)})`,
+        );
+        writeDebugLine(
+          params.debugErrorEvent,
+          {
+            profile: params.profile,
+            [params.debugUrlKey]: mediaUrl,
+            message: error instanceof Error ? error.message : String(error),
+          },
+          params.command,
+        );
+      }
+
+      return {
+        mediaPath,
+        mediaUrl,
+        mediaType: mediaType ?? undefined,
+      };
+    }),
+  );
 }
 
 function summarizeStructuredContent(msgType: unknown, content: unknown): string {
@@ -997,6 +1066,152 @@ function buildMediaAttachedText(params: {
   }
 
   return mediaNote;
+}
+
+type QuoteContext = {
+  ownerId?: string;
+  senderName?: string;
+  msg?: string;
+  attach?: unknown;
+  mediaUrl?: string;
+  mediaUrls?: string[];
+  mediaType?: string;
+  mediaTypes?: string[];
+  mediaPath?: string;
+  mediaPaths?: string[];
+  ts?: number;
+  cliMsgId?: string;
+  globalMsgId?: string;
+  cliMsgType?: number;
+};
+
+function parseToggleDefaultTrue(value: string | undefined): boolean {
+  if (value === undefined) return true;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return true;
+}
+
+function truncatePreview(value: string, maxLength = 220): string {
+  const normalized = value.trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(maxLength - 3, 1))}...`;
+}
+
+function normalizeQuoteContext(value: unknown): QuoteContext | null {
+  const normalized = normalizeStructuredContent(value);
+  const record = asObject(normalized);
+  if (!record) return null;
+
+  const ownerId = getStringCandidate(record, [
+    "ownerId",
+    "uidFrom",
+    "fromId",
+    "senderId",
+    "uid",
+  ]);
+  const senderName = getStringCandidate(record, [
+    "fromD",
+    "senderName",
+    "dName",
+    "displayName",
+    "name",
+  ]);
+  const msg = getStringCandidate(record, [
+    "msg",
+    "message",
+    "text",
+    "content",
+    "title",
+    "description",
+  ]);
+  const cliMsgId = getStringCandidate(record, ["cliMsgId"]);
+  const globalMsgId = getStringCandidate(record, ["globalMsgId", "msgId", "realMsgId"]);
+  const cliMsgType =
+    typeof record.cliMsgType === "number" && Number.isFinite(record.cliMsgType)
+      ? Math.trunc(record.cliMsgType)
+      : undefined;
+  const attach =
+    record.attach === undefined ? undefined : normalizeStructuredContent(record.attach);
+  const mediaUrlSet = new Set<string>();
+  if (attach !== undefined) {
+    collectHttpUrls(attach, mediaUrlSet);
+  }
+  const tsRaw = record.ts;
+  const tsNumeric =
+    typeof tsRaw === "number" ? tsRaw : typeof tsRaw === "string" ? Number(tsRaw) : Number.NaN;
+  const ts = Number.isFinite(tsNumeric) ? Math.trunc(tsNumeric) : undefined;
+
+  if (!ownerId && !senderName && !msg && !cliMsgId && !globalMsgId && attach === undefined) {
+    return null;
+  }
+
+  return {
+    ownerId: ownerId || undefined,
+    senderName: senderName || undefined,
+    msg: msg || undefined,
+    attach,
+    mediaUrls: mediaUrlSet.size > 0 ? [...mediaUrlSet] : undefined,
+    ts,
+    cliMsgId: cliMsgId || undefined,
+    globalMsgId: globalMsgId || undefined,
+    cliMsgType,
+  };
+}
+
+function buildReplyContextText(quote: QuoteContext): string {
+  const from = quote.senderName || quote.ownerId || "unknown";
+  const messageText = quote.msg?.trim() || "";
+  const attachText =
+    quote.attach !== undefined ? summarizeStructuredContent("quote", quote.attach) : "";
+  let summary = messageText || attachText;
+  if (
+    !summary ||
+    summary === "<non-text:quote>" ||
+    summary === "<non-text-message>"
+  ) {
+    if (quote.mediaUrls && quote.mediaUrls.length > 0) {
+      summary =
+        quote.mediaUrls.length > 1
+          ? `${quote.mediaUrls[0]} (+${quote.mediaUrls.length - 1} more)`
+          : quote.mediaUrls[0];
+    } else {
+      summary = "<quoted-message>";
+    }
+  }
+  return `[reply context: ${from}: ${truncatePreview(summary.replace(/\s+/g, " "))}]`;
+}
+
+function buildReplyMediaAttachedText(params: {
+  mediaEntries: Array<{ mediaPath?: string; mediaUrl?: string; mediaType?: string | null }>;
+}): string {
+  const entries = params.mediaEntries
+    .map((entry) => ({
+      pathOrUrl: entry.mediaPath ?? entry.mediaUrl,
+      mediaPath: entry.mediaPath,
+      mediaUrl: entry.mediaUrl,
+      mediaType: entry.mediaType,
+    }))
+    .filter((entry) => Boolean(entry.pathOrUrl));
+  if (entries.length === 0) return "";
+
+  const multiple = entries.length > 1;
+  const lines: string[] = [];
+  if (multiple) {
+    lines.push(`[reply media attached: ${entries.length} files]`);
+  }
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const typePart = entry.mediaType?.trim() ? ` (${entry.mediaType.trim()})` : "";
+    const urlPart = entry.mediaPath && entry.mediaUrl ? ` | ${entry.mediaUrl}` : "";
+    const prefix = multiple
+      ? `[reply media attached ${index + 1}/${entries.length}: `
+      : "[reply media attached: ";
+    lines.push(`${prefix}${entry.pathOrUrl}${typePart}${urlPart}]`);
+  }
+
+  return lines.join("\n");
 }
 
 function normalizeFriendLookupRows(value: unknown): Record<string, unknown>[] {
@@ -2744,6 +2959,12 @@ program
         const lifecycleEventsEnabled = supervised && Boolean(opts.raw);
         const recycleEnabled = !supervised && Boolean(opts.keepAlive) && recycleMs > 0;
         const recycleExitCode = 75;
+        const includeReplyContext = parseToggleDefaultTrue(
+          process.env.OPENZCA_LISTEN_INCLUDE_QUOTE_CONTEXT,
+        );
+        const downloadQuoteMedia = parseToggleDefaultTrue(
+          process.env.OPENZCA_LISTEN_DOWNLOAD_QUOTE_MEDIA,
+        );
         const sessionId = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 10)}`;
 
         const emitLifecycle = (
@@ -2780,6 +3001,8 @@ program
             lifecycleEventsEnabled,
             heartbeatMs: lifecycleEventsEnabled ? heartbeatMs : undefined,
             recycleMs: recycleEnabled ? recycleMs : undefined,
+            includeReplyContext,
+            downloadQuoteMedia,
             sessionId,
           },
           command,
@@ -2823,6 +3046,7 @@ program
           const messageData = message.data as Record<string, unknown>;
           const rawContent = messageData.content;
           const msgType = getStringCandidate(messageData, ["msgType"]);
+          let quote = normalizeQuoteContext(messageData.quote);
           const parsedContent = normalizeStructuredContent(rawContent);
           const hasParsedStructuredContent = parsedContent !== rawContent;
           const rawText = typeof rawContent === "string" ? rawContent : "";
@@ -2833,6 +3057,10 @@ program
             mediaKind && maxMediaFiles > 0
               ? resolvePreferredMediaUrls(mediaKind, parsedContent).slice(0, maxMediaFiles)
               : [];
+          const quoteRemoteMediaUrls =
+            quote && downloadQuoteMedia && maxMediaFiles > 0
+              ? (quote.mediaUrls ?? []).slice(0, maxMediaFiles)
+              : [];
           writeDebugLine(
             "listen.media.detected",
             {
@@ -2842,42 +3070,37 @@ program
               mediaKind,
               hasParsedStructuredContent,
               remoteMediaUrls,
+              hasQuote: Boolean(quote),
+              quoteOwnerId: quote?.ownerId,
+              quoteGlobalMsgId: quote?.globalMsgId,
+              quoteCliMsgId: quote?.cliMsgId,
+              quoteRemoteMediaUrls,
             },
             command,
           );
 
-          const mediaEntries: Array<{ mediaPath?: string; mediaUrl?: string; mediaType?: string }> = [];
-          for (const mediaUrl of remoteMediaUrls) {
-            let mediaPath: string | undefined;
-            let mediaType: string | null = null;
-            try {
-              if (mediaKind) {
-                const cached = await cacheInboundMediaToProfile(profile, mediaUrl, mediaKind);
-                if (cached) {
-                  mediaPath = cached.mediaPath;
-                  mediaType = cached.mediaType;
-                }
-              }
-            } catch (error) {
-              console.error(
-                `Warning: failed to cache inbound media (${error instanceof Error ? error.message : String(error)})`,
-              );
-              writeDebugLine(
-                "listen.media.cache_error",
-                {
+          const [mediaEntries, quoteMediaEntries] = await Promise.all([
+            mediaKind
+              ? cacheRemoteMediaEntries({
                   profile,
-                  mediaUrl,
-                  message: error instanceof Error ? error.message : String(error),
-                },
-                command,
-              );
-            }
-            mediaEntries.push({
-              mediaPath,
-              mediaUrl,
-              mediaType: mediaType ?? undefined,
-            });
-          }
+                  urls: remoteMediaUrls,
+                  kind: mediaKind,
+                  command,
+                  warningLabel: "inbound media",
+                  debugErrorEvent: "listen.media.cache_error",
+                  debugUrlKey: "mediaUrl",
+                })
+              : Promise.resolve([]),
+            cacheRemoteMediaEntries({
+              profile,
+              urls: quoteRemoteMediaUrls,
+              kind: "file",
+              command,
+              warningLabel: "quoted media",
+              debugErrorEvent: "listen.quote_media.cache_error",
+              debugUrlKey: "quoteMediaUrl",
+            }),
+          ]);
 
           const localEntries = mediaEntries.filter((entry) => Boolean(entry.mediaPath));
           const mediaPaths = localEntries.map((entry) => entry.mediaPath as string);
@@ -2902,6 +3125,46 @@ program
           const mediaUrl = mediaUrls[0];
           const mediaType = mediaTypes[0];
 
+          const quoteLocalEntries = quoteMediaEntries.filter((entry) => Boolean(entry.mediaPath));
+          const quoteMediaPaths = quoteLocalEntries.map((entry) => entry.mediaPath as string);
+          const quoteMediaUrls =
+            quoteLocalEntries.length > 0
+              ? quoteLocalEntries
+                  .map((entry) => entry.mediaUrl)
+                  .filter((value): value is string => Boolean(value))
+              : quoteMediaEntries
+                  .map((entry) => entry.mediaUrl)
+                  .filter((value): value is string => Boolean(value));
+          const quoteMediaTypes =
+            quoteLocalEntries.length > 0
+              ? quoteLocalEntries
+                  .map((entry) => entry.mediaType)
+                  .filter((value): value is string => Boolean(value))
+              : quoteMediaEntries
+                  .map((entry) => entry.mediaType)
+                  .filter((value): value is string => Boolean(value));
+          const quoteMediaPath = quoteMediaPaths[0];
+          const quoteMediaUrl = quoteMediaUrls[0];
+          const quoteMediaType = quoteMediaTypes[0];
+
+          if (quote) {
+            quote = {
+              ...quote,
+              mediaPath: quoteMediaPath,
+              mediaPaths: quoteMediaPaths.length > 0 ? quoteMediaPaths : undefined,
+              mediaUrl: quoteMediaUrl,
+              mediaUrls: quoteMediaUrls.length > 0 ? quoteMediaUrls : quote.mediaUrls,
+              mediaType: quoteMediaType,
+              mediaTypes: quoteMediaTypes.length > 0 ? quoteMediaTypes : undefined,
+            };
+          }
+          const replyContextText =
+            includeReplyContext && quote ? buildReplyContextText(quote) : "";
+          const replyMediaText =
+            includeReplyContext && quoteMediaEntries.length > 0
+              ? buildReplyMediaAttachedText({ mediaEntries: quoteMediaEntries })
+              : "";
+
           const caption =
             rawText.trim().length > 0 && !hasParsedStructuredContent
               ? rawText.trim()
@@ -2916,11 +3179,22 @@ program
               ? rawText
               : summarizeStructuredContent(msgType, parsedContent);
 
-          if (!processedText.trim()) return;
+          if (!processedText.trim() && !replyContextText && !replyMediaText) return;
 
-          if (opts.prefix) {
+          if (opts.prefix && processedText.trim().length > 0) {
             if (!processedText.startsWith(opts.prefix)) return;
             processedText = processedText.slice(opts.prefix.length).trimStart();
+          }
+
+          if (replyMediaText) {
+            processedText = processedText.trim()
+              ? `${processedText}\n${replyMediaText}`
+              : replyMediaText;
+          }
+          if (replyContextText) {
+            processedText = processedText.trim()
+              ? `${processedText}\n${replyContextText}`
+              : replyContextText;
           }
 
           const chatType = message.type === ThreadType.Group ? "group" : "user";
@@ -2948,6 +3222,13 @@ program
             type: message.type,
             timestamp,
             msgType: msgType || undefined,
+            quote: quote ?? undefined,
+            quoteMediaPath,
+            quoteMediaPaths: quoteMediaPaths.length > 0 ? quoteMediaPaths : undefined,
+            quoteMediaUrl,
+            quoteMediaUrls: quoteMediaUrls.length > 0 ? quoteMediaUrls : undefined,
+            quoteMediaType,
+            quoteMediaTypes: quoteMediaTypes.length > 0 ? quoteMediaTypes : undefined,
             mediaPath,
             mediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
             mediaUrl,
@@ -2967,6 +3248,13 @@ program
               fromId: senderId,
               toId,
               msgType: msgType || undefined,
+              quote: quote ?? undefined,
+              quoteMediaPath,
+              quoteMediaPaths: quoteMediaPaths.length > 0 ? quoteMediaPaths : undefined,
+              quoteMediaUrl,
+              quoteMediaUrls: quoteMediaUrls.length > 0 ? quoteMediaUrls : undefined,
+              quoteMediaType,
+              quoteMediaTypes: quoteMediaTypes.length > 0 ? quoteMediaTypes : undefined,
               timestamp,
               mediaPath,
               mediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
