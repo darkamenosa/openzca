@@ -192,6 +192,8 @@ For media debugging, grep these events in the debug log:
 | `openzca listen --webhook <url>` | POST message payload to a webhook URL |
 | `openzca listen --raw` | Output raw JSON per line |
 | `openzca listen --keep-alive` | Auto-reconnect on disconnect |
+| `openzca listen --supervised --raw` | Supervisor mode with lifecycle JSON events (`session_id`, `connected`, `heartbeat`, `error`, `closed`) |
+| `openzca listen --keep-alive --recycle-ms <ms>` | Periodically recycle listener process to avoid stale sessions |
 
 `listen --raw` includes inbound media metadata when available:
 
@@ -242,6 +244,21 @@ Optional overrides:
 - `OPENZCA_LISTEN_MEDIA_MAX_BYTES`: max bytes per inbound media file (default `20971520`, 20MB)
 - `OPENZCA_LISTEN_MEDIA_MAX_FILES`: max inbound media files extracted per message (default `4`, max `16`)
 - `OPENZCA_LISTEN_MEDIA_LEGACY_DIR=1`: use legacy storage at `~/.openzca/profiles/<profile>/inbound-media`
+
+Listener resilience override:
+
+- `OPENZCA_LISTEN_RECYCLE_MS`: when `listen --keep-alive` is used, force listener recycle after N milliseconds.
+  - Default: `1800000` (30 minutes) if not set.
+  - Set to `0` to disable auto recycle.
+  - On recycle, `openzca` exits with code `75` so external supervisors (like OpenClaw Gateway) can auto-restart it.
+- `OPENZCA_LISTEN_HEARTBEAT_MS`: heartbeat interval for `listen --supervised --raw` lifecycle events.
+  - Default: `30000` (30 seconds).
+  - Set to `0` to disable heartbeat events.
+
+Supervised mode notes:
+
+- Use `listen --supervised --raw` when an external process manager owns restart logic.
+- In supervised mode, internal websocket retry ownership is disabled (equivalent to forcing `retryOnClose=false`).
 
 ### account — Multi-account profiles
 

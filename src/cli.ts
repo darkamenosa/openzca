@@ -1099,6 +1099,15 @@ function toEpochSeconds(input: unknown): number {
   return Math.floor(numeric);
 }
 
+function parseNonNegativeIntOption(label: string, value?: string): number | undefined {
+  if (!value || !value.trim()) return undefined;
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${label} must be a non-negative number.`);
+  }
+  return Math.trunc(parsed);
+}
+
 program
   .name("openzca")
   .description("Open-source zca-cli compatible wrapper powered by zca-js")
@@ -2688,6 +2697,18 @@ program
   .option("-w, --webhook <url>", "POST message payload to webhook")
   .option("-r, --raw", "Output JSON line payload")
   .option("-k, --keep-alive", "Auto restart listener on disconnect")
+  .option(
+    "--supervised",
+    "Supervisor mode (disable internal retry ownership; emit lifecycle events in --raw)",
+  )
+  .option(
+    "--heartbeat-ms <ms>",
+    "Lifecycle heartbeat interval in --supervised mode (default: 30000, 0 disables)",
+  )
+  .option(
+    "--recycle-ms <ms>",
+    "Force recycle listener after N ms (or use OPENZCA_LISTEN_RECYCLE_MS)",
+  )
   .action(
     wrapAction(
       async (
@@ -2697,11 +2718,55 @@ program
           webhook?: string;
           raw?: boolean;
           keepAlive?: boolean;
+          supervised?: boolean;
+          heartbeatMs?: string;
+          recycleMs?: string;
         },
         command: Command,
       ) => {
         const { profile, api } = await requireApi(command);
+        const supervised = Boolean(opts.supervised);
+        const defaultRecycleMs = 30 * 60 * 1000;
+        const recycleMs =
+          parseNonNegativeIntOption("--recycle-ms", opts.recycleMs) ??
+          parseNonNegativeIntOption(
+            "OPENZCA_LISTEN_RECYCLE_MS",
+            process.env.OPENZCA_LISTEN_RECYCLE_MS,
+          ) ??
+          defaultRecycleMs;
+        const heartbeatMs =
+          parseNonNegativeIntOption("--heartbeat-ms", opts.heartbeatMs) ??
+          parseNonNegativeIntOption(
+            "OPENZCA_LISTEN_HEARTBEAT_MS",
+            process.env.OPENZCA_LISTEN_HEARTBEAT_MS,
+          ) ??
+          30_000;
+        const lifecycleEventsEnabled = supervised && Boolean(opts.raw);
+        const recycleEnabled = !supervised && Boolean(opts.keepAlive) && recycleMs > 0;
+        const recycleExitCode = 75;
+        const sessionId = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 10)}`;
+
+        const emitLifecycle = (
+          event: "session_id" | "connected" | "heartbeat" | "error" | "closed",
+          fields?: Record<string, unknown>,
+        ): void => {
+          if (!lifecycleEventsEnabled) return;
+          console.log(
+            JSON.stringify({
+              kind: "lifecycle",
+              event,
+              session_id: sessionId,
+              profile,
+              timestamp: Math.floor(Date.now() / 1000),
+              ...fields,
+            }),
+          );
+        };
+
         console.log("Listening... Press Ctrl+C to stop.");
+        if (supervised && opts.keepAlive) {
+          console.error("Warning: --supervised ignores internal --keep-alive reconnect ownership.");
+        }
         writeDebugLine(
           "listen.start",
           {
@@ -2710,9 +2775,16 @@ program
             maxMediaBytes: parseMaxInboundMediaBytes(),
             maxMediaFiles: parseMaxInboundMediaFiles(),
             includeMediaUrl: process.env.OPENZCA_LISTEN_INCLUDE_MEDIA_URL?.trim() ?? null,
+            keepAlive: Boolean(opts.keepAlive),
+            supervised,
+            lifecycleEventsEnabled,
+            heartbeatMs: lifecycleEventsEnabled ? heartbeatMs : undefined,
+            recycleMs: recycleEnabled ? recycleMs : undefined,
+            sessionId,
           },
           command,
         );
+        emitLifecycle("session_id");
 
         async function emitWebhook(payload: Record<string, unknown>): Promise<void> {
           if (!opts.webhook) return;
@@ -2736,6 +2808,15 @@ program
 
         api.listener.on("connected", () => {
           console.log("Connected to Zalo websocket.");
+          writeDebugLine(
+            "listen.connected",
+            {
+              profile,
+              sessionId,
+            },
+            command,
+          );
+          emitLifecycle("connected");
         });
 
         api.listener.on("message", async (message) => {
@@ -2930,6 +3011,18 @@ program
         });
 
         api.listener.on("error", (error) => {
+          writeDebugLine(
+            "listen.error",
+            {
+              profile,
+              message: error instanceof Error ? error.message : String(error),
+              sessionId,
+            },
+            command,
+          );
+          emitLifecycle("error", {
+            message: error instanceof Error ? error.message : String(error),
+          });
           console.error(
             `Listener error: ${error instanceof Error ? error.message : String(error)}`,
           );
@@ -2937,18 +3030,48 @@ program
 
         await new Promise<void>((resolve) => {
           let settled = false;
+          let recycleTimer: ReturnType<typeof setTimeout> | null = null;
+          let recycleForceExitTimer: ReturnType<typeof setTimeout> | null = null;
+          let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+          let recyclePendingExit = false;
 
           const finish = () => {
             if (settled) return;
             settled = true;
+            if (recycleTimer) {
+              clearTimeout(recycleTimer);
+              recycleTimer = null;
+            }
+            if (recycleForceExitTimer && !recyclePendingExit) {
+              clearTimeout(recycleForceExitTimer);
+              recycleForceExitTimer = null;
+            }
+            if (heartbeatTimer) {
+              clearInterval(heartbeatTimer);
+              heartbeatTimer = null;
+            }
             resolve();
           };
 
           api.listener.on("closed", (code, reason) => {
             console.log(`Listener closed (${code}) ${reason || ""}`);
+            writeDebugLine(
+              "listen.closed",
+              {
+                profile,
+                code,
+                reason: reason || undefined,
+                sessionId,
+              },
+              command,
+            );
+            emitLifecycle("closed", {
+              code,
+              reason: reason || undefined,
+            });
             // In keep-alive mode, zca-js handles reconnect internally.
             // Do not terminate the process on transient close events.
-            if (!opts.keepAlive) {
+            if (!opts.keepAlive || supervised) {
               finish();
             }
           });
@@ -2962,8 +3085,49 @@ program
             finish();
           };
 
+          if (lifecycleEventsEnabled && heartbeatMs > 0) {
+            heartbeatTimer = setInterval(() => {
+              emitLifecycle("heartbeat");
+            }, heartbeatMs);
+          }
+
+          if (recycleEnabled) {
+            recycleTimer = setTimeout(() => {
+              console.error(
+                `Listener recycle triggered after ${recycleMs}ms to prevent stale session.`,
+              );
+              writeDebugLine(
+                "listen.recycle",
+                {
+                  profile,
+                  recycleMs,
+                  exitCode: recycleExitCode,
+                  sessionId,
+                },
+                command,
+              );
+
+              // Exit non-zero so an external supervisor (e.g. OpenClaw Gateway)
+              // can restart this listener process reliably.
+              process.exitCode = recycleExitCode;
+              recyclePendingExit = true;
+              recycleForceExitTimer = setTimeout(() => {
+                recycleForceExitTimer = null;
+                process.exit(recycleExitCode);
+              }, 3000);
+              recycleForceExitTimer.unref();
+
+              try {
+                api.listener.stop();
+              } catch {
+                // ignore
+              }
+              finish();
+            }, recycleMs);
+          }
+
           process.once("SIGINT", onSigint);
-          api.listener.start({ retryOnClose: Boolean(opts.keepAlive) });
+          api.listener.start({ retryOnClose: supervised ? false : Boolean(opts.keepAlive) });
         });
       },
     ),
