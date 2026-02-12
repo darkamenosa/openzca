@@ -2843,20 +2843,29 @@ program
           }
 
           const chatType = message.type === ThreadType.Group ? "group" : "user";
+          const senderId = getStringCandidate(messageData, ["uidFrom"]) || message.data.uidFrom;
+          const senderDisplayNameRaw = getStringCandidate(messageData, ["dName"]);
+          const senderDisplayName = senderDisplayNameRaw || undefined;
+          // Keep DM metadata senderName empty so downstream prefers stable numeric ids.
+          const senderNameForMetadata = message.type === ThreadType.Group ? senderDisplayName : undefined;
+          const toId = getStringCandidate(messageData, ["idTo"]) || undefined;
           const threadName =
             typeof messageData.threadName === "string"
               ? messageData.threadName
               : typeof messageData.tName === "string"
                 ? messageData.tName
                 : undefined;
+          const timestamp = toEpochSeconds(message.data.ts);
 
           const payload = {
             threadId: message.threadId,
+            targetId: message.threadId,
+            conversationId: message.threadId,
             msgId: message.data.msgId,
             cliMsgId: message.data.cliMsgId,
             content: processedText,
             type: message.type,
-            timestamp: toEpochSeconds(message.data.ts),
+            timestamp,
             msgType: msgType || undefined,
             mediaPath,
             mediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
@@ -2867,9 +2876,17 @@ program
             mediaKind: mediaKind ?? undefined,
             metadata: {
               isGroup: message.type === ThreadType.Group,
+              chatType,
+              threadId: message.threadId,
+              targetId: message.threadId,
               threadName,
-              senderName: message.data.dName,
-              fromId: message.data.uidFrom,
+              senderName: senderNameForMetadata,
+              senderDisplayName,
+              senderId,
+              fromId: senderId,
+              toId,
+              msgType: msgType || undefined,
+              timestamp,
               mediaPath,
               mediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
               mediaUrl,
@@ -2880,8 +2897,10 @@ program
             },
             // Backward-compatible convenience fields.
             chatType,
-            senderId: message.data.uidFrom,
-            senderName: message.data.dName,
+            senderId,
+            senderName: senderDisplayName,
+            senderDisplayName,
+            toId,
             ts: message.data.ts,
           };
 

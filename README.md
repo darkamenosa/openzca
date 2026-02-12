@@ -200,6 +200,14 @@ For media debugging, grep these events in the debug log:
 - `mediaType`, `mediaTypes`
 - `mediaKind`
 
+It also includes stable routing fields for downstream tools:
+
+- `threadId`, `targetId`, `conversationId`
+- `senderId`, `toId`, `chatType`, `msgType`, `timestamp`
+- `metadata.threadId`, `metadata.targetId`, `metadata.senderId`, `metadata.toId`
+
+For direct messages, `metadata.senderName` is intentionally omitted so consumers can prefer numeric IDs for routing instead of display-name targets.
+
 `listen` also normalizes JSON-string message payloads (common for `chat.voice` and `share.file`) so media URLs are extracted/cached instead of being forwarded as raw JSON text.
 
 For non-text inbound messages (image/video/audio/file), `content` is emitted as a media note:
