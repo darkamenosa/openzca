@@ -76,7 +76,7 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 | `openzca msg delete <msgId> <cliMsgId> <uidFrom> <threadId>` | Delete a message |
 | `openzca msg undo <msgId> <cliMsgId> <threadId>` | Recall a sent message |
 | `openzca msg upload <arg1> [arg2]` | Upload and send file(s) |
-| `openzca msg recent <threadId>` | List recent messages (`-n`, `--json`); group mode uses direct group-history API |
+| `openzca msg recent <threadId>` | List recent messages (`-n`, `--json`, newest-first); group mode uses direct group-history API |
 
 Media commands accept local files, `file://` paths, and repeatable `--url` options. Add `--group` for group threads.
 Local paths using `~` are expanded automatically (for positional file args, `--url`, and `OPENZCA_LISTEN_MEDIA_DIR`).
@@ -272,6 +272,9 @@ Listener resilience override:
 - `OPENZCA_LISTEN_DOWNLOAD_QUOTE_MEDIA`: download quoted attachment URLs (if present) into inbound media cache.
   - Default: enabled.
   - Set to `0` to keep only quote metadata/URLs without downloading.
+- `OPENZCA_RECENT_USER_MAX_PAGES`: max websocket history pages to scan for `msg recent` in user/DM mode.
+  - Default: `6`.
+  - Increase if a DM thread is old and not found in the first page.
 - `OPENZCA_LISTEN_ENFORCE_SINGLE_OWNER`: enforce one `listen` owner process per profile.
   - Default: enabled.
   - Set to `0` to allow multiple listeners on the same profile (not recommended).

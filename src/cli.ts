@@ -1303,6 +1303,37 @@ type GroupHistoryCapableApi = API & {
   ) => Promise<{ groupMsgs?: RecentThreadMessage[] }>;
 };
 
+function parseRecentMessageTs(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return 0;
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) {
+      return Math.trunc(parsed);
+    }
+  }
+  return 0;
+}
+
+function sortRecentMessagesNewestFirst(messages: RecentThreadMessage[]): RecentThreadMessage[] {
+  return [...messages].sort((left, right) => {
+    const rightTs = parseRecentMessageTs(right.data?.ts);
+    const leftTs = parseRecentMessageTs(left.data?.ts);
+    if (rightTs !== leftTs) return rightTs - leftTs;
+
+    const rightMsgId = String(right.data?.msgId ?? "");
+    const leftMsgId = String(left.data?.msgId ?? "");
+    if (rightMsgId !== leftMsgId) return rightMsgId.localeCompare(leftMsgId);
+
+    const rightCliMsgId = String(right.data?.cliMsgId ?? "");
+    const leftCliMsgId = String(left.data?.cliMsgId ?? "");
+    return rightCliMsgId.localeCompare(leftCliMsgId);
+  });
+}
+
 async function fetchRecentGroupMessagesViaApi(
   api: API,
   threadId: string,
@@ -1316,7 +1347,7 @@ async function fetchRecentGroupMessagesViaApi(
   }
   const response = await historyApi(threadId, count);
   const messages = Array.isArray(response?.groupMsgs) ? response.groupMsgs : [];
-  return messages.slice(0, count);
+  return sortRecentMessagesNewestFirst(messages).slice(0, count);
 }
 
 async function fetchRecentUserMessagesViaListener(
@@ -1327,6 +1358,26 @@ async function fetchRecentUserMessagesViaListener(
   return new Promise((resolve, reject) => {
     let settled = false;
     const collected: RecentThreadMessage[] = [];
+    const seenMessageKeys = new Set<string>();
+    const requestedLastIds = new Set<string>();
+    const maxPages = parsePositiveIntFromEnv("OPENZCA_RECENT_USER_MAX_PAGES", 6);
+    let pagesRequested = 0;
+
+    const toKey = (message: RecentThreadMessage): string => {
+      const msgId = String(message.data?.msgId ?? "");
+      const cliMsgId = String(message.data?.cliMsgId ?? "");
+      return `${msgId}:${cliMsgId}`;
+    };
+
+    const requestPage = (lastMsgId: string | null) => {
+      if (lastMsgId) {
+        if (requestedLastIds.has(lastMsgId)) return false;
+        requestedLastIds.add(lastMsgId);
+      }
+      pagesRequested += 1;
+      api.listener.requestOldMessages(ThreadType.User, lastMsgId);
+      return true;
+    };
 
     const cleanup = () => {
       clearTimeout(timeoutId);
@@ -1350,12 +1401,12 @@ async function fetchRecentUserMessagesViaListener(
         reject(error);
         return;
       }
-      resolve(collected.slice(0, count));
+      resolve(sortRecentMessagesNewestFirst(collected).slice(0, count));
     };
 
     const onConnected = () => {
       try {
-        api.listener.requestOldMessages(ThreadType.User, null);
+        requestPage(null);
       } catch (error) {
         finish(error);
       }
@@ -1368,11 +1419,53 @@ async function fetchRecentUserMessagesViaListener(
 
       for (const message of typedMessages) {
         if (message.threadId === threadId) {
+          const key = toKey(message);
+          if (seenMessageKeys.has(key)) continue;
+          seenMessageKeys.add(key);
           collected.push(message);
         }
       }
 
-      finish();
+      if (collected.length >= count) {
+        finish();
+        return;
+      }
+
+      if (typedMessages.length === 0) {
+        finish();
+        return;
+      }
+
+      if (pagesRequested >= maxPages) {
+        finish();
+        return;
+      }
+
+      let oldest: RecentThreadMessage | null = null;
+      for (const message of typedMessages) {
+        if (!oldest) {
+          oldest = message;
+          continue;
+        }
+        if (parseRecentMessageTs(message.data?.ts) < parseRecentMessageTs(oldest.data?.ts)) {
+          oldest = message;
+        }
+      }
+
+      const nextLastId = String(oldest?.data?.msgId ?? "").trim();
+      if (!nextLastId) {
+        finish();
+        return;
+      }
+
+      try {
+        const requested = requestPage(nextLastId);
+        if (!requested) {
+          finish();
+        }
+      } catch (error) {
+        finish(error);
+      }
     };
 
     const onError = (error: unknown) => {
