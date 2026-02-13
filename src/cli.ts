@@ -803,7 +803,7 @@ async function resolveUploadThreadType(
     return { type: ThreadType.Group, reason: "explicit_group_flag" };
   }
 
-  const autoDetectEnabled = parseBooleanFromEnv("OPENZCA_UPLOAD_AUTO_THREAD_TYPE", true);
+  const autoDetectEnabled = parseBooleanFromEnv("OPENZCA_UPLOAD_AUTO_THREAD_TYPE", false);
   if (!autoDetectEnabled) {
     return { type: ThreadType.User, reason: "auto_detect_disabled" };
   }

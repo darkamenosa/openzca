@@ -303,6 +303,12 @@ Upload/listener coordination overrides:
 - `OPENZCA_UPLOAD_ENFORCE_SINGLE_OWNER`: when an active listener owner exists but IPC is unavailable, fail fast instead of starting a second listener.
   - Default: enabled.
   - Set to `0` to allow fallback listener startup (may disconnect active listener due duplicate websocket ownership).
+- `OPENZCA_UPLOAD_AUTO_THREAD_TYPE`: auto-detect `msg upload` thread type (group/user) when `--group` is not provided.
+  - Default: disabled (`0`) for safer routing.
+  - Set to `1` to enable cache/probe-based detection.
+- `OPENZCA_UPLOAD_GROUP_PROBE`: allow `msg upload` to probe `getGroupInfo` when auto thread-type detection is enabled.
+  - Default: enabled.
+  - Set to `0` to skip probe and rely only on cache matches.
 
 ### account — Multi-account profiles
 
