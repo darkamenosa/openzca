@@ -3765,16 +3765,65 @@ group
         throw new Error(`Group not found: ${groupId}`);
       }
 
-      const ids = groupInfo.memberIds ?? [];
+      const normalizeMemberId = (value: unknown): string => {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          return String(Math.trunc(value));
+        }
+        if (typeof value !== "string") return "";
+        const trimmed = value.trim();
+        if (!trimmed) return "";
+        return trimmed.replace(/_\d+$/, "");
+      };
+
+      const idsFromMemberIds = Array.isArray(groupInfo.memberIds)
+        ? groupInfo.memberIds.map((id) => normalizeMemberId(id)).filter(Boolean)
+        : [];
+      const memVerList = (groupInfo as { memVerList?: unknown }).memVerList;
+      const idsFromMemVerList = Array.isArray(memVerList)
+        ? memVerList.map((id) => normalizeMemberId(id)).filter(Boolean)
+        : [];
+
+      const currentMems = Array.isArray(groupInfo.currentMems) ? groupInfo.currentMems : [];
+      const currentMemberMap = new Map<string, { displayName: string; zaloName: string }>();
+      for (const member of currentMems) {
+        const userId = normalizeMemberId(member.id);
+        if (!userId) continue;
+        currentMemberMap.set(userId, {
+          displayName: member.dName?.trim() || member.zaloName?.trim() || "",
+          zaloName: member.zaloName?.trim() || "",
+        });
+      }
+
+      const ids = Array.from(
+        new Set<string>([
+          ...idsFromMemberIds,
+          ...idsFromMemVerList,
+          ...Array.from(currentMemberMap.keys()),
+        ]),
+      );
+
       const profiles = ids.length > 0 ? await api.getGroupMembersInfo(ids) : { profiles: {} };
-      const profileMap = profiles.profiles as Record<
+      const rawProfileMap = profiles.profiles as Record<
         string,
-        { displayName?: string; zaloName?: string }
+        { id?: string; displayName?: string; zaloName?: string } | undefined
       >;
+      const profileMap = new Map<string, { displayName?: string; zaloName?: string }>();
+      for (const [key, profile] of Object.entries(rawProfileMap)) {
+        if (!profile) continue;
+        const normalizedKey = normalizeMemberId(key);
+        if (normalizedKey && !profileMap.has(normalizedKey)) {
+          profileMap.set(normalizedKey, profile);
+        }
+        const profileId = normalizeMemberId(profile.id);
+        if (profileId && !profileMap.has(profileId)) {
+          profileMap.set(profileId, profile);
+        }
+      }
+
       const rows = ids.map((id) => ({
         userId: id,
-        displayName: profileMap[id]?.displayName ?? "",
-        zaloName: profileMap[id]?.zaloName ?? "",
+        displayName: profileMap.get(id)?.displayName ?? currentMemberMap.get(id)?.displayName ?? "",
+        zaloName: profileMap.get(id)?.zaloName ?? currentMemberMap.get(id)?.zaloName ?? "",
       }));
 
       if (opts.json) {
