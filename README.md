@@ -206,7 +206,10 @@ It also includes stable routing fields for downstream tools:
 
 - `threadId`, `targetId`, `conversationId`
 - `senderId`, `toId`, `chatType`, `msgType`, `timestamp`
+- `mentions` (normalized mention entities: `uid`, `pos`, `len`, `type`, optional `text`)
+- `mentionIds` (flattened mention user IDs)
 - `metadata.threadId`, `metadata.targetId`, `metadata.senderId`, `metadata.toId`
+- `metadata.mentions`, `metadata.mentionIds`, `metadata.mentionCount`
 - `quote` and `metadata.quote` when the inbound message is a reply to a previous message
   - Includes parsed `quote.attach` and extracted `quote.mediaUrls` when attachment URLs are present.
 - `quoteMediaPath`, `quoteMediaPaths`, `quoteMediaUrl`, `quoteMediaUrls`, `quoteMediaType`, `quoteMediaTypes`

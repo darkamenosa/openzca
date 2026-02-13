@@ -1085,6 +1085,14 @@ type QuoteContext = {
   cliMsgType?: number;
 };
 
+type InboundMention = {
+  uid: string;
+  pos?: number;
+  len?: number;
+  type?: number;
+  text?: string;
+};
+
 function parseToggleDefaultTrue(value: string | undefined): boolean {
   if (value === undefined) return true;
   const normalized = value.trim().toLowerCase();
@@ -1212,6 +1220,134 @@ function buildReplyMediaAttachedText(params: {
   }
 
   return lines.join("\n");
+}
+
+function parseOptionalInt(value: unknown): number | undefined {
+  const numeric =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number(value)
+        : Number.NaN;
+  if (!Number.isFinite(numeric)) return undefined;
+  return Math.trunc(numeric);
+}
+
+function buildInboundMention(record: Record<string, unknown>, rawText: string): InboundMention | null {
+  const uid = getStringCandidate(record, ["uid", "userId", "user_id", "id"]);
+  if (!uid) return null;
+
+  const pos = parseOptionalInt(record.pos ?? record.offset ?? record.start ?? record.index);
+  const len = parseOptionalInt(record.len ?? record.length);
+  const type = parseOptionalInt(record.type ?? record.kind);
+  let text =
+    getStringCandidate(record, ["text", "label", "name"]) ||
+    (typeof pos === "number" &&
+    typeof len === "number" &&
+    len > 0 &&
+    pos >= 0 &&
+    pos < rawText.length
+      ? rawText.slice(pos, Math.min(rawText.length, pos + len))
+      : "");
+
+  if (!text.trim()) {
+    text = "";
+  }
+
+  return {
+    uid,
+    ...(typeof pos === "number" ? { pos } : {}),
+    ...(typeof len === "number" ? { len } : {}),
+    ...(typeof type === "number" ? { type } : {}),
+    ...(text ? { text } : {}),
+  };
+}
+
+function collectInboundMentions(
+  value: unknown,
+  sink: Map<string, InboundMention>,
+  rawText: string,
+  depth = 0,
+): void {
+  if (depth > 6 || sink.size >= 64 || value === null || value === undefined) {
+    return;
+  }
+
+  if (typeof value === "string") {
+    if (!looksLikeStructuredJsonString(value)) return;
+    try {
+      const parsed = JSON.parse(value);
+      collectInboundMentions(parsed, sink, rawText, depth + 1);
+    } catch {
+      // ignore invalid JSON content
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const mention = asObject(item) ? buildInboundMention(item as Record<string, unknown>, rawText) : null;
+      if (mention) {
+        const key = `${mention.uid}|${mention.pos ?? ""}|${mention.len ?? ""}|${mention.type ?? ""}`;
+        sink.set(key, mention);
+        continue;
+      }
+      collectInboundMentions(item, sink, rawText, depth + 1);
+      if (sink.size >= 64) return;
+    }
+    return;
+  }
+
+  const record = asObject(value);
+  if (!record) return;
+
+  const direct = buildInboundMention(record, rawText);
+  if (direct) {
+    const key = `${direct.uid}|${direct.pos ?? ""}|${direct.len ?? ""}|${direct.type ?? ""}`;
+    sink.set(key, direct);
+  }
+
+  const mentionKeys = [
+    "mentions",
+    "mentionInfo",
+    "mention_info",
+    "mentionList",
+    "mention_list",
+    "mention",
+  ];
+  for (const key of mentionKeys) {
+    if (!(key in record)) continue;
+    collectInboundMentions(record[key], sink, rawText, depth + 1);
+    if (sink.size >= 64) return;
+  }
+
+  for (const nested of Object.values(record)) {
+    collectInboundMentions(nested, sink, rawText, depth + 1);
+    if (sink.size >= 64) return;
+  }
+}
+
+function extractInboundMentions(params: {
+  messageData: Record<string, unknown>;
+  parsedContent: unknown;
+  rawText: string;
+}): InboundMention[] {
+  const sink = new Map<string, InboundMention>();
+  const candidates: unknown[] = [
+    params.messageData.mentions,
+    params.messageData.mentionInfo,
+    params.messageData.mention_info,
+    params.messageData.mentionList,
+    params.messageData.mention_list,
+    params.messageData.mention,
+    params.messageData.content,
+    params.parsedContent,
+  ];
+  for (const candidate of candidates) {
+    collectInboundMentions(candidate, sink, params.rawText);
+    if (sink.size >= 64) break;
+  }
+  return [...sink.values()];
 }
 
 function normalizeFriendLookupRows(value: unknown): Record<string, unknown>[] {
@@ -3215,6 +3351,12 @@ program
               : typeof messageData.tName === "string"
                 ? messageData.tName
                 : undefined;
+          const mentions = extractInboundMentions({
+            messageData,
+            parsedContent,
+            rawText,
+          });
+          const mentionIds = mentions.map((item) => item.uid);
           const timestamp = toEpochSeconds(message.data.ts);
 
           const payload = {
@@ -3241,6 +3383,8 @@ program
             mediaType,
             mediaTypes: mediaTypes.length > 0 ? mediaTypes : undefined,
             mediaKind: mediaKind ?? undefined,
+            mentions: mentions.length > 0 ? mentions : undefined,
+            mentionIds: mentionIds.length > 0 ? mentionIds : undefined,
             metadata: {
               isGroup: message.type === ThreadType.Group,
               chatType,
@@ -3268,6 +3412,9 @@ program
               mediaType,
               mediaTypes: mediaTypes.length > 0 ? mediaTypes : undefined,
               mediaKind: mediaKind ?? undefined,
+              mentions: mentions.length > 0 ? mentions : undefined,
+              mentionIds: mentionIds.length > 0 ? mentionIds : undefined,
+              mentionCount: mentions.length > 0 ? mentions.length : undefined,
             },
             // Backward-compatible convenience fields.
             chatType,

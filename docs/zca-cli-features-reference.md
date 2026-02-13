@@ -141,6 +141,8 @@ Listener media behavior (openzca additions):
   - `mediaUrl`, `mediaUrls`
   - `mediaType`, `mediaTypes`
   - `mediaKind`
+  - `mentions`, `mentionIds`
+  - `metadata.mentions`, `metadata.mentionIds`, `metadata.mentionCount`
 - Default inbound media cache path is under OpenClaw state dir:
   - `~/.openclaw/media/openzca/<profile>/inbound`
   - or `${OPENCLAW_STATE_DIR}/media/openzca/<profile>/inbound`
