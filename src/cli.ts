@@ -1281,6 +1281,7 @@ async function withUploadListener<T>(
 }
 
 type RecentThreadMessageData = {
+  actionId?: string;
   msgId: string;
   cliMsgId: string;
   uidFrom: string;
@@ -1334,6 +1335,15 @@ function sortRecentMessagesNewestFirst(messages: RecentThreadMessage[]): RecentT
   });
 }
 
+function getRecentMessageCursor(message: RecentThreadMessage | null): string {
+  if (!message) return "";
+
+  const actionId = String(message.data?.actionId ?? "").trim();
+  if (actionId) return actionId;
+
+  return String(message.data?.msgId ?? "").trim();
+}
+
 async function fetchRecentGroupMessagesViaApi(
   api: API,
   threadId: string,
@@ -1359,8 +1369,8 @@ async function fetchRecentUserMessagesViaListener(
     let settled = false;
     const collected: RecentThreadMessage[] = [];
     const seenMessageKeys = new Set<string>();
-    const requestedLastIds = new Set<string>();
-    const maxPages = parsePositiveIntFromEnv("OPENZCA_RECENT_USER_MAX_PAGES", 6);
+    const requestedCursors = new Set<string>();
+    const maxPages = parsePositiveIntFromEnv("OPENZCA_RECENT_USER_MAX_PAGES", 20);
     let pagesRequested = 0;
 
     const toKey = (message: RecentThreadMessage): string => {
@@ -1369,13 +1379,14 @@ async function fetchRecentUserMessagesViaListener(
       return `${msgId}:${cliMsgId}`;
     };
 
-    const requestPage = (lastMsgId: string | null) => {
-      if (lastMsgId) {
-        if (requestedLastIds.has(lastMsgId)) return false;
-        requestedLastIds.add(lastMsgId);
+    const requestPage = (lastId: string | null) => {
+      const cursor = String(lastId ?? "").trim();
+      if (cursor) {
+        if (requestedCursors.has(cursor)) return false;
+        requestedCursors.add(cursor);
       }
       pagesRequested += 1;
-      api.listener.requestOldMessages(ThreadType.User, lastMsgId);
+      api.listener.requestOldMessages(ThreadType.User, cursor || null);
       return true;
     };
 
@@ -1452,14 +1463,14 @@ async function fetchRecentUserMessagesViaListener(
         }
       }
 
-      const nextLastId = String(oldest?.data?.msgId ?? "").trim();
-      if (!nextLastId) {
+      const nextCursor = getRecentMessageCursor(oldest);
+      if (!nextCursor) {
         finish();
         return;
       }
 
       try {
-        const requested = requestPage(nextLastId);
+        const requested = requestPage(nextCursor);
         if (!requested) {
           finish();
         }

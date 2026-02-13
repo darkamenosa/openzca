@@ -273,7 +273,7 @@ Listener resilience override:
   - Default: enabled.
   - Set to `0` to keep only quote metadata/URLs without downloading.
 - `OPENZCA_RECENT_USER_MAX_PAGES`: max websocket history pages to scan for `msg recent` in user/DM mode.
-  - Default: `6`.
+  - Default: `20`.
   - Increase if a DM thread is old and not found in the first page.
 - `OPENZCA_LISTEN_ENFORCE_SINGLE_OWNER`: enforce one `listen` owner process per profile.
   - Default: enabled.
