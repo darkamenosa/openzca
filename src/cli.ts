@@ -1280,41 +1280,53 @@ async function withUploadListener<T>(
   }
 }
 
-async function fetchRecentMessagesViaListener(
+type RecentThreadMessageData = {
+  msgId: string;
+  cliMsgId: string;
+  uidFrom: string;
+  dName?: string;
+  ts: string;
+  msgType: string;
+  content: unknown;
+};
+
+type RecentThreadMessage = {
+  threadId: string;
+  type: ThreadType;
+  data: RecentThreadMessageData;
+};
+
+type GroupHistoryCapableApi = API & {
+  getGroupChatHistory?: (
+    groupId: string,
+    count?: number,
+  ) => Promise<{ groupMsgs?: RecentThreadMessage[] }>;
+};
+
+async function fetchRecentGroupMessagesViaApi(
   api: API,
   threadId: string,
-  threadType: ThreadType,
   count: number,
-): Promise<
-  Array<{
-    threadId: string;
-    type: ThreadType;
-    data: {
-      msgId: string;
-      cliMsgId: string;
-      uidFrom: string;
-      dName?: string;
-      ts: string;
-      msgType: string;
-      content: unknown;
-    };
-  }>
-> {
+): Promise<RecentThreadMessage[]> {
+  const historyApi = (api as GroupHistoryCapableApi).getGroupChatHistory;
+  if (typeof historyApi !== "function") {
+    throw new Error(
+      "Current zca-js build does not expose getGroupChatHistory(). Upgrade zca-js/openzca.",
+    );
+  }
+  const response = await historyApi(threadId, count);
+  const messages = Array.isArray(response?.groupMsgs) ? response.groupMsgs : [];
+  return messages.slice(0, count);
+}
+
+async function fetchRecentUserMessagesViaListener(
+  api: API,
+  threadId: string,
+  count: number,
+): Promise<RecentThreadMessage[]> {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const collected: Array<{
-      threadId: string;
-      type: ThreadType;
-      data: {
-        msgId: string;
-        cliMsgId: string;
-        uidFrom: string;
-        dName?: string;
-        ts: string;
-        msgType: string;
-        content: unknown;
-      };
-    }> = [];
+    const collected: RecentThreadMessage[] = [];
 
     const cleanup = () => {
       clearTimeout(timeoutId);
@@ -1343,28 +1355,16 @@ async function fetchRecentMessagesViaListener(
 
     const onConnected = () => {
       try {
-        api.listener.requestOldMessages(threadType, null);
+        api.listener.requestOldMessages(ThreadType.User, null);
       } catch (error) {
         finish(error);
       }
     };
 
     const onOldMessages = (messages: unknown[], type: ThreadType) => {
-      if (type !== threadType) return;
+      if (type !== ThreadType.User) return;
 
-      const typedMessages = messages as Array<{
-        threadId: string;
-        type: ThreadType;
-        data: {
-          msgId: string;
-          cliMsgId: string;
-          uidFrom: string;
-          dName?: string;
-          ts: string;
-          msgType: string;
-          content: unknown;
-        };
-      }>;
+      const typedMessages = messages as RecentThreadMessage[];
 
       for (const message of typedMessages) {
         if (message.threadId === threadId) {
@@ -3201,7 +3201,7 @@ msg
   .option("-g, --group", "List recent messages for group thread")
   .option("-n, --count <count>", "Number of messages (default: 20)", "20")
   .option("-j, --json", "JSON output")
-  .description("List recent messages via websocket history")
+  .description("List recent messages (group uses direct history API)")
   .action(
     wrapAction(
       async (
@@ -3216,12 +3216,13 @@ msg
           : 20;
 
         const threadType = opts.group ? ThreadType.Group : ThreadType.User;
-        const messages = await fetchRecentMessagesViaListener(
-          api,
-          threadId,
-          threadType,
-          count,
-        );
+        const messages = opts.group
+          ? await fetchRecentGroupMessagesViaApi(api, threadId, count)
+          : await fetchRecentUserMessagesViaListener(
+              api,
+              threadId,
+              count,
+            );
         const rows = messages.map((message) => ({
           msgId: message.data.msgId,
           cliMsgId: message.data.cliMsgId,
