@@ -384,6 +384,39 @@ async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: stri
   }
 }
 
+async function stopUploadListenerSafely(
+  api: API,
+  command: Command | undefined,
+  waitClosedMs = 1_500,
+): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      api.listener.off("closed", onClosed);
+      resolve();
+    };
+
+    const onClosed = () => {
+      finish();
+    };
+
+    api.listener.on("closed", onClosed);
+    timeoutId = setTimeout(finish, waitClosedMs);
+
+    try {
+      api.listener.stop();
+      writeDebugLine("msg.upload.listener.stop", undefined, command);
+    } catch {
+      finish();
+    }
+  });
+}
+
 async function withUploadListener<T>(
   api: API,
   command: Command | undefined,
@@ -498,17 +531,12 @@ async function withUploadListener<T>(
       `Timed out waiting ${uploadTimeoutMs}ms for file upload completion.`,
     );
   } finally {
+    if (startedHere) {
+      await stopUploadListenerSafely(api, command);
+    }
+
     api.listener.off("error", sinkError);
     api.listener.off("closed", sinkClosed);
-
-    if (startedHere) {
-      try {
-        api.listener.stop();
-        writeDebugLine("msg.upload.listener.stop", undefined, command);
-      } catch {
-        // ignore cleanup errors
-      }
-    }
   }
 }
 
