@@ -409,8 +409,19 @@ async function stopUploadListenerSafely(
     timeoutId = setTimeout(finish, waitClosedMs);
 
     try {
-      api.listener.stop();
-      writeDebugLine("msg.upload.listener.stop", undefined, command);
+      /**
+       * zca-js Listener.stop() currently clears cipherKey immediately via reset(),
+       * which can race with late websocket frames and trigger decode failures.
+       * For upload flow, close the underlying ws directly and let zca-js reset on onclose.
+       */
+      const internalWs = (api.listener as unknown as { ws?: { close: (code?: number) => void } }).ws;
+      if (internalWs && typeof internalWs.close === "function") {
+        internalWs.close(1000);
+        writeDebugLine("msg.upload.listener.stop.ws_close", undefined, command);
+      } else {
+        api.listener.stop();
+        writeDebugLine("msg.upload.listener.stop", undefined, command);
+      }
     } catch {
       finish();
     }
