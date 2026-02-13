@@ -3199,7 +3199,12 @@ program
 
           const chatType = message.type === ThreadType.Group ? "group" : "user";
           const senderId = getStringCandidate(messageData, ["uidFrom"]) || message.data.uidFrom;
-          const senderDisplayNameRaw = getStringCandidate(messageData, ["dName"]);
+          const senderDisplayNameRaw = getStringCandidate(messageData, [
+            "dName",
+            "fromD",
+            "senderName",
+            "displayName",
+          ]);
           const senderDisplayName = senderDisplayNameRaw || undefined;
           // Keep DM metadata senderName empty so downstream prefers stable numeric ids.
           const senderNameForMetadata = message.type === ThreadType.Group ? senderDisplayName : undefined;
