@@ -208,6 +208,115 @@ function asThreadType(groupFlag?: boolean): ThreadType {
   return groupFlag ? ThreadType.Group : ThreadType.User;
 }
 
+function parseBooleanFromEnv(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const normalized = raw.toLowerCase();
+  if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") {
+    return true;
+  }
+  if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+  return fallback;
+}
+
+function normalizeCachedId(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(Math.trunc(value));
+  }
+  return null;
+}
+
+function collectIdsFromCacheEntries(entries: unknown[], keys: string[]): Set<string> {
+  const ids = new Set<string>();
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const row = entry as Record<string, unknown>;
+    for (const key of keys) {
+      const normalized = normalizeCachedId(row[key]);
+      if (normalized) {
+        ids.add(normalized);
+      }
+    }
+  }
+  return ids;
+}
+
+async function resolveUploadThreadType(
+  api: API,
+  profile: string,
+  threadId: string,
+  groupFlag: boolean | undefined,
+  command?: Command,
+): Promise<{ type: ThreadType; reason: string }> {
+  if (groupFlag) {
+    return { type: ThreadType.Group, reason: "explicit_group_flag" };
+  }
+
+  const autoDetectEnabled = parseBooleanFromEnv("OPENZCA_UPLOAD_AUTO_THREAD_TYPE", true);
+  if (!autoDetectEnabled) {
+    return { type: ThreadType.User, reason: "auto_detect_disabled" };
+  }
+
+  try {
+    const cache = await readCache(profile);
+    const groupIds = collectIdsFromCacheEntries(cache.groups, ["groupId", "grid", "threadId", "id"]);
+    if (groupIds.has(threadId)) {
+      return { type: ThreadType.Group, reason: "cache_group_match" };
+    }
+
+    const friendIds = collectIdsFromCacheEntries(cache.friends, ["userId", "uid", "id", "threadId"]);
+    if (friendIds.has(threadId)) {
+      return { type: ThreadType.User, reason: "cache_friend_match" };
+    }
+  } catch (error) {
+    writeDebugLine(
+      "msg.upload.thread_type.cache_error",
+      {
+        profile,
+        threadId,
+        message: toErrorText(error),
+      },
+      command,
+    );
+  }
+
+  const probeEnabled = parseBooleanFromEnv("OPENZCA_UPLOAD_GROUP_PROBE", true);
+  if (!probeEnabled) {
+    return { type: ThreadType.User, reason: "probe_disabled" };
+  }
+
+  const probeTimeoutMs = parsePositiveIntFromEnv("OPENZCA_UPLOAD_GROUP_PROBE_TIMEOUT_MS", 5_000);
+  try {
+    const groupInfo = (await withTimeout(
+      api.getGroupInfo(threadId),
+      probeTimeoutMs,
+      `Timed out waiting ${probeTimeoutMs}ms while probing group thread type.`,
+    )) as { gridInfoMap?: Record<string, unknown> };
+
+    if (groupInfo?.gridInfoMap?.[threadId]) {
+      return { type: ThreadType.Group, reason: "probe_group_match" };
+    }
+  } catch (error) {
+    writeDebugLine(
+      "msg.upload.thread_type.probe_error",
+      {
+        profile,
+        threadId,
+        message: toErrorText(error),
+      },
+      command,
+    );
+  }
+
+  return { type: ThreadType.User, reason: "default_user" };
+}
+
 function parseReaction(input: string): Reactions {
   const normalized = input.trim();
 
@@ -2443,19 +2552,29 @@ msg
         opts: { url?: string[]; group?: boolean },
         command: Command,
       ) => {
-        const { api } = await requireApi(command);
+        const { api, profile } = await requireApi(command);
         const inputs = normalizeInputList(opts.url);
         const urlInputs = inputs.filter((entry) => isHttpUrl(entry));
         const localInputs = inputs.filter((entry) => !isHttpUrl(entry));
 
         const [threadId, file] = arg2 ? [arg2, arg1] : [arg1, undefined];
+        const threadResolution = await resolveUploadThreadType(
+          api,
+          profile,
+          threadId,
+          opts.group,
+          command,
+        );
         const normalizedFile = file ? normalizeMediaInput(file) : undefined;
         const localFiles = [normalizedFile, ...localInputs].filter(Boolean) as string[];
         writeDebugLine(
           "msg.upload.inputs",
           {
             threadId,
-            isGroup: Boolean(opts.group),
+            explicitGroupFlag: Boolean(opts.group),
+            isGroup: threadResolution.type === ThreadType.Group,
+            threadType: threadResolution.type === ThreadType.Group ? "group" : "user",
+            threadTypeReason: threadResolution.reason,
             localFiles,
             urlInputs,
           },
@@ -2479,7 +2598,7 @@ msg
                 attachments,
               },
               threadId,
-              asThreadType(opts.group),
+              threadResolution.type,
             ),
           );
           output(response, false);
