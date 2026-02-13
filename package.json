@@ -42,15 +42,15 @@
   },
   "dependencies": {
     "@types/qrcode-terminal": "^0.12.2",
-    "commander": "^14.0.2",
+    "commander": "^14.0.3",
     "image-size": "^2.0.2",
     "qrcode-terminal": "^0.12.0",
     "zca-js": "^2.0.4"
   },
   "devDependencies": {
-    "@types/node": "^24.5.2",
-    "tsup": "^8.5.0",
+    "@types/node": "^25.2.3",
+    "tsup": "^8.5.1",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.3"
   }
 }
