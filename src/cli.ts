@@ -1304,6 +1304,17 @@ type GroupHistoryCapableApi = API & {
   ) => Promise<{ groupMsgs?: RecentThreadMessage[] }>;
 };
 
+type GroupHistoryCustomApi = API & {
+  __openzcaGroupHistory?: (props: {
+    groupId: string;
+    count: number;
+  }) => Promise<{ groupMsgs?: unknown[] }>;
+  custom?: <T, K = any>(
+    name: string,
+    callback: (args: { utils: any; props: K }) => T | Promise<T>,
+  ) => void;
+};
+
 function parseRecentMessageTs(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.trunc(value);
@@ -1347,12 +1358,122 @@ function getRecentMessageCursor(message: RecentThreadMessage | null): string {
   return String(message.data?.cliMsgId ?? "").trim();
 }
 
-function getRecentPageCursor(messages: RecentThreadMessage[]): string {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const cursor = getRecentMessageCursor(messages[index] ?? null);
-    if (cursor) return cursor;
+function getOldestRecentMessage(messages: RecentThreadMessage[]): RecentThreadMessage | null {
+  let oldest: RecentThreadMessage | null = null;
+  for (const message of messages) {
+    if (!oldest) {
+      oldest = message;
+      continue;
+    }
+    if (parseRecentMessageTs(message.data?.ts) < parseRecentMessageTs(oldest.data?.ts)) {
+      oldest = message;
+    }
   }
-  return "";
+  return oldest;
+}
+
+function getRecentPageCursors(messages: RecentThreadMessage[]): string[] {
+  const cursors: string[] = [];
+  const seen = new Set<string>();
+
+  const addCursor = (value: string) => {
+    const cursor = value.trim();
+    if (!cursor || seen.has(cursor)) return;
+    seen.add(cursor);
+    cursors.push(cursor);
+  };
+
+  addCursor(getRecentMessageCursor(getOldestRecentMessage(messages)));
+  addCursor(getRecentMessageCursor(messages[messages.length - 1] ?? null));
+  addCursor(getRecentMessageCursor(messages[0] ?? null));
+
+  return cursors;
+}
+
+function normalizeGroupHistoryMessages(
+  messages: unknown[],
+  fallbackThreadId: string,
+): RecentThreadMessage[] {
+  const normalized: RecentThreadMessage[] = [];
+
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue;
+    const raw = message as Record<string, unknown>;
+
+    if (raw.data && raw.threadId) {
+      const wrapped = raw as RecentThreadMessage;
+      normalized.push(wrapped);
+      continue;
+    }
+
+    const threadIdRaw = String(raw.idTo ?? "").trim();
+    normalized.push({
+      threadId: threadIdRaw || fallbackThreadId,
+      type: ThreadType.Group,
+      data: {
+        actionId:
+          typeof raw.actionId === "string" && raw.actionId.trim()
+            ? raw.actionId
+            : undefined,
+        msgId: String(raw.msgId ?? ""),
+        cliMsgId: String(raw.cliMsgId ?? ""),
+        uidFrom: String(raw.uidFrom ?? ""),
+        dName: typeof raw.dName === "string" ? raw.dName : undefined,
+        ts: String(raw.ts ?? ""),
+        msgType: String(raw.msgType ?? ""),
+        content: raw.content ?? "",
+      },
+    });
+  }
+
+  return normalized;
+}
+
+async function fetchRecentGroupMessagesViaCustomApi(
+  api: API,
+  threadId: string,
+  count: number,
+): Promise<RecentThreadMessage[]> {
+  const customApi = api as GroupHistoryCustomApi;
+  if (typeof customApi.__openzcaGroupHistory !== "function") {
+    if (typeof customApi.custom !== "function") {
+      throw new Error("Current zca-js build does not expose API custom hooks.");
+    }
+
+    customApi.custom("__openzcaGroupHistory", async ({ utils, props }) => {
+      const serviceURL = utils.makeURL(`${api.zpwServiceMap.group[0]}/api/group/history`);
+      const encryptedParams = utils.encodeAES(
+        JSON.stringify({
+          grid: props.groupId,
+          count: props.count,
+        }),
+      );
+      if (!encryptedParams) throw new Error("Failed to encrypt group history params.");
+      const response = await utils.request(
+        utils.makeURL(serviceURL, { params: encryptedParams }),
+        { method: "GET" },
+      );
+      return await utils.resolve(response, (result: { data?: unknown }) => {
+        if (typeof result.data === "string") {
+          try {
+            return JSON.parse(result.data) as { groupMsgs?: unknown[] };
+          } catch {
+            return { groupMsgs: [] as unknown[] };
+          }
+        }
+        return (result.data ?? { groupMsgs: [] }) as { groupMsgs?: unknown[] };
+      });
+    });
+  }
+
+  const response = await customApi.__openzcaGroupHistory?.({
+    groupId: threadId,
+    count,
+  });
+  const messagesRaw = Array.isArray(response?.groupMsgs) ? response.groupMsgs : [];
+  return sortRecentMessagesNewestFirst(
+    normalizeGroupHistoryMessages(messagesRaw, threadId),
+  ).slice(0, count);
 }
 
 async function fetchRecentGroupMessagesViaApi(
@@ -1364,11 +1485,18 @@ async function fetchRecentGroupMessagesViaApi(
   if (typeof historyApi === "function") {
     try {
       const response = await historyApi(threadId, count);
-      const messages = Array.isArray(response?.groupMsgs) ? response.groupMsgs : [];
-      return sortRecentMessagesNewestFirst(messages).slice(0, count);
+      const messagesRaw = Array.isArray(response?.groupMsgs) ? response.groupMsgs : [];
+      return sortRecentMessagesNewestFirst(
+        normalizeGroupHistoryMessages(messagesRaw, threadId),
+      ).slice(0, count);
     } catch {
       // Fall back to websocket history path when direct group history API fails.
     }
+  }
+  try {
+    return await fetchRecentGroupMessagesViaCustomApi(api, threadId, count);
+  } catch {
+    // Fall back to websocket history path when direct group history API fails.
   }
   return fetchRecentGroupMessagesViaListener(api, threadId, count);
 }
@@ -1465,17 +1593,16 @@ async function fetchRecentGroupMessagesViaListener(
         return;
       }
 
-      const nextCursor = getRecentPageCursor(typedMessages);
-      if (!nextCursor) {
-        finish();
-        return;
-      }
-
       try {
-        const requested = requestPage(nextCursor);
-        if (!requested) {
-          finish();
+        const cursorCandidates = getRecentPageCursors(typedMessages);
+        let requested = false;
+        for (const cursor of cursorCandidates) {
+          if (requestPage(cursor)) {
+            requested = true;
+            break;
+          }
         }
+        if (!requested) finish();
       } catch (error) {
         finish(error);
       }
@@ -1598,17 +1725,16 @@ async function fetchRecentUserMessagesViaListener(
         return;
       }
 
-      const nextCursor = getRecentPageCursor(typedMessages);
-      if (!nextCursor) {
-        finish();
-        return;
-      }
-
       try {
-        const requested = requestPage(nextCursor);
-        if (!requested) {
-          finish();
+        const cursorCandidates = getRecentPageCursors(typedMessages);
+        let requested = false;
+        for (const cursor of cursorCandidates) {
+          if (requestPage(cursor)) {
+            requested = true;
+            break;
+          }
         }
+        if (!requested) finish();
       } catch (error) {
         finish(error);
       }
