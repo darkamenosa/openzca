@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -245,6 +246,550 @@ function collectIdsFromCacheEntries(entries: unknown[], keys: string[]): Set<str
     }
   }
   return ids;
+}
+
+type ListenerOwnerRecord = {
+  pid: number;
+  profile: string;
+  sessionId?: string;
+  startedAt: string;
+};
+
+type ListenerOwnerLockHandle = {
+  lockPath: string;
+  release: () => Promise<void>;
+};
+
+type ListenerIpcServerHandle = {
+  socketPath: string;
+  close: () => Promise<void>;
+};
+
+type UploadIpcRequest = {
+  kind: "upload";
+  requestId: string;
+  profile: string;
+  threadId: string;
+  threadType: "group" | "user";
+  attachments: string[];
+  uploadTimeoutMs?: number;
+};
+
+type UploadIpcResponse =
+  | {
+      kind: "upload_result";
+      requestId: string;
+      ok: true;
+      response: unknown;
+    }
+  | {
+      kind: "upload_result";
+      requestId: string;
+      ok: false;
+      error: string;
+    };
+
+type UploadIpcAttemptResult =
+  | { handled: true; response: unknown }
+  | { handled: false; reason: string };
+
+function getListenerOwnerLockPath(profile: string): string {
+  return path.join(getProfileDir(profile), "listener-owner.json");
+}
+
+function getListenIpcSocketPath(profile: string): string {
+  if (process.platform === "win32") {
+    const safe = profile.replace(/[^A-Za-z0-9_-]/g, "_");
+    return `\\\\.\\pipe\\openzca-listen-${safe}`;
+  }
+  return path.join(getProfileDir(profile), "listen.sock");
+}
+
+function parsePositiveIntFromUnknown(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.trunc(value);
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EPERM") return true;
+    return false;
+  }
+}
+
+async function readListenerOwnerRecord(lockPath: string): Promise<ListenerOwnerRecord | null> {
+  try {
+    const raw = await fs.readFile(lockPath, "utf8");
+    const parsed = JSON.parse(raw) as Partial<ListenerOwnerRecord>;
+    const pid = parsePositiveIntFromUnknown(parsed.pid);
+    if (!pid) return null;
+    return {
+      pid,
+      profile: String(parsed.profile ?? ""),
+      sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : undefined,
+      startedAt: typeof parsed.startedAt === "string" ? parsed.startedAt : "",
+    };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function readActiveListenerOwner(profile: string): Promise<ListenerOwnerRecord | null> {
+  const lockPath = getListenerOwnerLockPath(profile);
+  const record = await readListenerOwnerRecord(lockPath);
+  if (!record) {
+    await fs.rm(lockPath, { force: true });
+    return null;
+  }
+
+  if (!isProcessAlive(record.pid)) {
+    await fs.rm(lockPath, { force: true });
+    return null;
+  }
+
+  return record;
+}
+
+async function acquireListenerOwnerLock(
+  profile: string,
+  sessionId: string,
+  command?: Command,
+): Promise<ListenerOwnerLockHandle> {
+  await ensureProfile(profile);
+  const lockPath = getListenerOwnerLockPath(profile);
+  const record: ListenerOwnerRecord = {
+    pid: process.pid,
+    profile,
+    sessionId,
+    startedAt: new Date().toISOString(),
+  };
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await fs.writeFile(lockPath, `${JSON.stringify(record, null, 2)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+
+      let released = false;
+      return {
+        lockPath,
+        release: async () => {
+          if (released) return;
+          released = true;
+          const current = await readListenerOwnerRecord(lockPath);
+          if (current && current.pid !== process.pid) return;
+          await fs.rm(lockPath, { force: true });
+          writeDebugLine(
+            "listen.owner.released",
+            {
+              profile,
+              lockPath,
+              pid: process.pid,
+            },
+            command,
+          );
+        },
+      };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") throw error;
+
+      const owner = await readActiveListenerOwner(profile);
+      if (owner) {
+        throw new Error(
+          `Another openzca listener already owns profile "${profile}" (pid ${owner.pid}).`,
+        );
+      }
+      await fs.rm(lockPath, { force: true });
+    }
+  }
+
+  throw new Error(`Unable to acquire listener ownership for profile "${profile}".`);
+}
+
+async function startListenerIpcServer(
+  api: API,
+  profile: string,
+  sessionId: string,
+  command?: Command,
+): Promise<ListenerIpcServerHandle | null> {
+  if (!parseBooleanFromEnv("OPENZCA_LISTEN_IPC", true)) {
+    writeDebugLine(
+      "listen.ipc.disabled",
+      {
+        profile,
+      },
+      command,
+    );
+    return null;
+  }
+
+  const socketPath = getListenIpcSocketPath(profile);
+  if (process.platform !== "win32") {
+    await fs.rm(socketPath, { force: true });
+  }
+
+  const uploadTimeoutMs = parsePositiveIntFromEnv(
+    "OPENZCA_UPLOAD_IPC_HANDLER_TIMEOUT_MS",
+    parsePositiveIntFromEnv("OPENZCA_UPLOAD_TIMEOUT_MS", 120_000),
+  );
+
+  const server = net.createServer((socket) => {
+    socket.setEncoding("utf8");
+    let buffer = "";
+    let done = false;
+
+    const sendResponse = (response: UploadIpcResponse) => {
+      if (done) return;
+      done = true;
+      socket.end(`${JSON.stringify(response)}\n`);
+    };
+
+    const fail = (requestId: string, message: string) => {
+      sendResponse({
+        kind: "upload_result",
+        requestId,
+        ok: false,
+        error: message,
+      });
+    };
+
+    const handleRequest = async (line: string) => {
+      if (done) return;
+      let parsed: UploadIpcRequest;
+      try {
+        parsed = JSON.parse(line) as UploadIpcRequest;
+      } catch {
+        fail("", "Invalid JSON request.");
+        return;
+      }
+
+      if (parsed.kind !== "upload") {
+        fail(parsed.requestId || "", "Unsupported IPC request kind.");
+        return;
+      }
+      if (parsed.profile !== profile) {
+        fail(parsed.requestId, "Profile mismatch.");
+        return;
+      }
+      if (!parsed.threadId || !Array.isArray(parsed.attachments) || parsed.attachments.length === 0) {
+        fail(parsed.requestId, "Invalid upload payload.");
+        return;
+      }
+
+      const threadType = parsed.threadType === "group" ? ThreadType.Group : ThreadType.User;
+      const requestTimeoutMs =
+        parsePositiveIntFromUnknown(parsed.uploadTimeoutMs) ?? uploadTimeoutMs;
+
+      writeDebugLine(
+        "listen.ipc.upload.start",
+        {
+          profile,
+          sessionId,
+          requestId: parsed.requestId,
+          threadId: parsed.threadId,
+          threadType: parsed.threadType,
+          attachmentCount: parsed.attachments.length,
+          timeoutMs: requestTimeoutMs,
+        },
+        command,
+      );
+
+      try {
+        const response = await withTimeout(
+          api.sendMessage(
+            {
+              msg: "",
+              attachments: parsed.attachments,
+            },
+            parsed.threadId,
+            threadType,
+          ),
+          requestTimeoutMs,
+          `Timed out waiting ${requestTimeoutMs}ms for IPC upload completion.`,
+        );
+
+        sendResponse({
+          kind: "upload_result",
+          requestId: parsed.requestId,
+          ok: true,
+          response,
+        });
+
+        writeDebugLine(
+          "listen.ipc.upload.done",
+          {
+            profile,
+            sessionId,
+            requestId: parsed.requestId,
+            threadId: parsed.threadId,
+            threadType: parsed.threadType,
+          },
+          command,
+        );
+      } catch (error) {
+        fail(parsed.requestId, toErrorText(error));
+        writeDebugLine(
+          "listen.ipc.upload.error",
+          {
+            profile,
+            sessionId,
+            requestId: parsed.requestId,
+            threadId: parsed.threadId,
+            threadType: parsed.threadType,
+            message: toErrorText(error),
+          },
+          command,
+        );
+      }
+    };
+
+    socket.on("data", (chunk) => {
+      if (done) return;
+      buffer += chunk;
+      if (buffer.length > 2_000_000) {
+        fail("", "IPC request too large.");
+        return;
+      }
+
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex === -1) return;
+
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = "";
+      if (!line) {
+        fail("", "Empty IPC request.");
+        return;
+      }
+      void handleRequest(line);
+    });
+
+    socket.on("error", (error) => {
+      writeDebugLine(
+        "listen.ipc.socket_error",
+        {
+          profile,
+          sessionId,
+          message: toErrorText(error),
+        },
+        command,
+      );
+    });
+  });
+
+  server.on("error", (error) => {
+    writeDebugLine(
+      "listen.ipc.server_error",
+      {
+        profile,
+        sessionId,
+        message: toErrorText(error),
+      },
+      command,
+    );
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+
+  writeDebugLine(
+    "listen.ipc.started",
+    {
+      profile,
+      sessionId,
+      socketPath,
+    },
+    command,
+  );
+
+  let closed = false;
+  return {
+    socketPath,
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+      if (process.platform !== "win32") {
+        await fs.rm(socketPath, { force: true });
+      }
+      writeDebugLine(
+        "listen.ipc.stopped",
+        {
+          profile,
+          sessionId,
+          socketPath,
+        },
+        command,
+      );
+    },
+  };
+}
+
+async function tryUploadViaListenerIpc(
+  profile: string,
+  threadId: string,
+  threadType: ThreadType,
+  attachments: string[],
+  command?: Command,
+): Promise<UploadIpcAttemptResult> {
+  if (!parseBooleanFromEnv("OPENZCA_UPLOAD_IPC", true)) {
+    return { handled: false, reason: "ipc_disabled" };
+  }
+
+  const socketPath = getListenIpcSocketPath(profile);
+  const requestId = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 10)}`;
+  const connectTimeoutMs = parsePositiveIntFromEnv("OPENZCA_UPLOAD_IPC_CONNECT_TIMEOUT_MS", 1_000);
+  const requestTimeoutMs = parsePositiveIntFromEnv(
+    "OPENZCA_UPLOAD_IPC_TIMEOUT_MS",
+    parsePositiveIntFromEnv("OPENZCA_UPLOAD_TIMEOUT_MS", 120_000) + 5_000,
+  );
+
+  writeDebugLine(
+    "msg.upload.ipc.try",
+    {
+      profile,
+      threadId,
+      threadType: threadType === ThreadType.Group ? "group" : "user",
+      attachmentCount: attachments.length,
+      socketPath,
+      requestId,
+      connectTimeoutMs,
+      requestTimeoutMs,
+    },
+    command,
+  );
+
+  return await new Promise<UploadIpcAttemptResult>((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    let connected = false;
+    let settled = false;
+    let responseBuffer = "";
+    let requestSent = false;
+
+    const finish = (result?: UploadIpcAttemptResult, error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(connectTimer);
+      clearTimeout(requestTimer);
+      if (!socket.destroyed) {
+        socket.destroy();
+      }
+
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(result ?? { handled: false, reason: "unknown" });
+    };
+
+    const connectTimer = setTimeout(() => {
+      finish(undefined, new Error(`Timed out waiting ${connectTimeoutMs}ms to connect upload IPC.`));
+    }, connectTimeoutMs);
+
+    const requestTimer = setTimeout(() => {
+      finish(undefined, new Error(`Timed out waiting ${requestTimeoutMs}ms for upload IPC response.`));
+    }, requestTimeoutMs);
+
+    socket.setEncoding("utf8");
+
+    socket.on("connect", () => {
+      connected = true;
+      clearTimeout(connectTimer);
+
+      const payload: UploadIpcRequest = {
+        kind: "upload",
+        requestId,
+        profile,
+        threadId,
+        threadType: threadType === ThreadType.Group ? "group" : "user",
+        attachments,
+      };
+      socket.write(`${JSON.stringify(payload)}\n`);
+      requestSent = true;
+    });
+
+    socket.on("data", (chunk) => {
+      responseBuffer += chunk;
+      const newlineIndex = responseBuffer.indexOf("\n");
+      if (newlineIndex === -1) return;
+
+      const line = responseBuffer.slice(0, newlineIndex).trim();
+      if (!line) {
+        finish(undefined, new Error("Upload IPC returned empty response."));
+        return;
+      }
+
+      let parsed: UploadIpcResponse;
+      try {
+        parsed = JSON.parse(line) as UploadIpcResponse;
+      } catch {
+        finish(undefined, new Error("Upload IPC returned invalid JSON."));
+        return;
+      }
+
+      if (parsed.kind !== "upload_result" || parsed.requestId !== requestId) {
+        finish(undefined, new Error("Upload IPC returned mismatched response."));
+        return;
+      }
+
+      if (!parsed.ok) {
+        finish(undefined, new Error(parsed.error || "Upload IPC failed."));
+        return;
+      }
+
+      finish({
+        handled: true,
+        response: parsed.response,
+      });
+    });
+
+    socket.on("error", (error) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!connected && !requestSent && (code === "ENOENT" || code === "ECONNREFUSED")) {
+        finish({
+          handled: false,
+          reason: code.toLowerCase(),
+        });
+        return;
+      }
+      finish(undefined, error);
+    });
+
+    socket.on("close", () => {
+      if (settled) return;
+      if (!connected && !requestSent) {
+        finish({
+          handled: false,
+          reason: "socket_closed_before_connect",
+        });
+        return;
+      }
+      finish(undefined, new Error("Upload IPC connection closed before response."));
+    });
+  });
 }
 
 async function resolveUploadThreadType(
@@ -2591,6 +3136,48 @@ msg
           }
           await assertFilesExist(attachments);
 
+          const ipcResult = await tryUploadViaListenerIpc(
+            profile,
+            threadId,
+            threadResolution.type,
+            attachments,
+            command,
+          );
+          if (ipcResult.handled) {
+            writeDebugLine(
+              "msg.upload.ipc.done",
+              {
+                threadId,
+                threadType: threadResolution.type === ThreadType.Group ? "group" : "user",
+              },
+              command,
+            );
+            output(ipcResult.response, false);
+            return;
+          }
+
+          writeDebugLine(
+            "msg.upload.ipc.fallback",
+            {
+              threadId,
+              threadType: threadResolution.type === ThreadType.Group ? "group" : "user",
+              reason: ipcResult.reason,
+            },
+            command,
+          );
+
+          const enforceSingleOwner = parseBooleanFromEnv("OPENZCA_UPLOAD_ENFORCE_SINGLE_OWNER", true);
+          if (enforceSingleOwner) {
+            const owner = await readActiveListenerOwner(profile);
+            if (owner && owner.pid !== process.pid) {
+              throw new Error(
+                `Active listener owner detected for profile "${profile}" (pid ${owner.pid}), ` +
+                  "but upload IPC is unavailable. Restart `openzca listen` with latest version " +
+                  "or set OPENZCA_UPLOAD_ENFORCE_SINGLE_OWNER=0 to allow fallback listener startup.",
+              );
+            }
+          }
+
           const response = await withUploadListener(api, command, async () =>
             api.sendMessage(
               {
@@ -3645,30 +4232,74 @@ program
           );
         };
 
-        console.log("Listening... Press Ctrl+C to stop.");
-        if (supervised && opts.keepAlive) {
-          console.error("Warning: --supervised ignores internal --keep-alive reconnect ownership.");
-        }
-        writeDebugLine(
-          "listen.start",
-          {
-            profile,
-            mediaDir: resolveInboundMediaDir(profile),
-            maxMediaBytes: parseMaxInboundMediaBytes(),
-            maxMediaFiles: parseMaxInboundMediaFiles(),
-            includeMediaUrl: process.env.OPENZCA_LISTEN_INCLUDE_MEDIA_URL?.trim() ?? null,
-            keepAlive: Boolean(opts.keepAlive),
-            supervised,
-            lifecycleEventsEnabled,
-            heartbeatMs: lifecycleEventsEnabled ? heartbeatMs : undefined,
-            recycleMs: recycleEnabled ? recycleMs : undefined,
-            includeReplyContext,
-            downloadQuoteMedia,
-            sessionId,
-          },
-          command,
-        );
-        emitLifecycle("session_id");
+        const enforceSingleOwner = parseBooleanFromEnv("OPENZCA_LISTEN_ENFORCE_SINGLE_OWNER", true);
+        let ownerLock: ListenerOwnerLockHandle | null = null;
+        let ipcServer: ListenerIpcServerHandle | null = null;
+        let ipcSocketPath: string | undefined;
+        let resourcesCleaned = false;
+
+        const cleanupListenResources = async () => {
+          if (resourcesCleaned) return;
+          resourcesCleaned = true;
+
+          if (ipcServer) {
+            await ipcServer.close();
+            ipcServer = null;
+          }
+          if (ownerLock) {
+            await ownerLock.release();
+            ownerLock = null;
+          }
+        };
+
+        const unregisterResourceCleanup = registerShutdownCallback(async () => {
+          await cleanupListenResources();
+        });
+
+        try {
+          if (enforceSingleOwner) {
+            ownerLock = await acquireListenerOwnerLock(profile, sessionId, command);
+            writeDebugLine(
+              "listen.owner.acquired",
+              {
+                profile,
+                lockPath: ownerLock.lockPath,
+                pid: process.pid,
+                sessionId,
+              },
+              command,
+            );
+          }
+
+          ipcServer = await startListenerIpcServer(api, profile, sessionId, command);
+          ipcSocketPath = ipcServer?.socketPath;
+
+          console.log("Listening... Press Ctrl+C to stop.");
+          if (supervised && opts.keepAlive) {
+            console.error("Warning: --supervised ignores internal --keep-alive reconnect ownership.");
+          }
+          writeDebugLine(
+            "listen.start",
+            {
+              profile,
+              mediaDir: resolveInboundMediaDir(profile),
+              maxMediaBytes: parseMaxInboundMediaBytes(),
+              maxMediaFiles: parseMaxInboundMediaFiles(),
+              includeMediaUrl: process.env.OPENZCA_LISTEN_INCLUDE_MEDIA_URL?.trim() ?? null,
+              keepAlive: Boolean(opts.keepAlive),
+              supervised,
+              lifecycleEventsEnabled,
+              heartbeatMs: lifecycleEventsEnabled ? heartbeatMs : undefined,
+              recycleMs: recycleEnabled ? recycleMs : undefined,
+              includeReplyContext,
+              downloadQuoteMedia,
+              sessionId,
+              singleOwner: enforceSingleOwner,
+              ipcSocketPath,
+            },
+            command,
+          );
+          emitLifecycle("session_id");
 
         async function emitWebhook(payload: Record<string, unknown>): Promise<void> {
           if (!opts.webhook) return;
@@ -3993,7 +4624,7 @@ program
           );
         });
 
-        await new Promise<void>((resolve) => {
+          await new Promise<void>((resolve) => {
           let settled = false;
           let recycleTimer: ReturnType<typeof setTimeout> | null = null;
           let recycleForceExitTimer: ReturnType<typeof setTimeout> | null = null;
@@ -4096,8 +4727,12 @@ program
             }, recycleMs);
           }
 
-          api.listener.start({ retryOnClose: supervised ? false : Boolean(opts.keepAlive) });
-        });
+            api.listener.start({ retryOnClose: supervised ? false : Boolean(opts.keepAlive) });
+          });
+        } finally {
+          unregisterResourceCleanup();
+          await cleanupListenResources();
+        }
       },
     ),
   );

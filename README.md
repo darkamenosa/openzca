@@ -272,11 +272,32 @@ Listener resilience override:
 - `OPENZCA_LISTEN_DOWNLOAD_QUOTE_MEDIA`: download quoted attachment URLs (if present) into inbound media cache.
   - Default: enabled.
   - Set to `0` to keep only quote metadata/URLs without downloading.
+- `OPENZCA_LISTEN_ENFORCE_SINGLE_OWNER`: enforce one `listen` owner process per profile.
+  - Default: enabled.
+  - Set to `0` to allow multiple listeners on the same profile (not recommended).
+- `OPENZCA_LISTEN_IPC`: expose local IPC socket from `listen` so `msg upload` can reuse the active websocket session.
+  - Default: enabled.
+  - Set to `0` to disable IPC.
 
 Supervised mode notes:
 
 - Use `listen --supervised --raw` when an external process manager owns restart logic.
 - In supervised mode, internal websocket retry ownership is disabled (equivalent to forcing `retryOnClose=false`).
+
+Upload/listener coordination overrides:
+
+- `OPENZCA_UPLOAD_IPC`: try upload via active listener IPC first.
+  - Default: enabled.
+  - Set to `0` to disable IPC path.
+- `OPENZCA_UPLOAD_IPC_CONNECT_TIMEOUT_MS`: timeout for connecting to listener IPC socket.
+  - Default: `1000`.
+- `OPENZCA_UPLOAD_IPC_TIMEOUT_MS`: timeout waiting for listener IPC upload response.
+  - Default: `OPENZCA_UPLOAD_TIMEOUT_MS + 5000`.
+- `OPENZCA_UPLOAD_IPC_HANDLER_TIMEOUT_MS`: timeout applied by listener IPC while executing upload.
+  - Default: same as `OPENZCA_UPLOAD_TIMEOUT_MS` (120000 if unset).
+- `OPENZCA_UPLOAD_ENFORCE_SINGLE_OWNER`: when an active listener owner exists but IPC is unavailable, fail fast instead of starting a second listener.
+  - Default: enabled.
+  - Set to `0` to allow fallback listener startup (may disconnect active listener due duplicate websocket ownership).
 
 ### account — Multi-account profiles
 
