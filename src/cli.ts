@@ -1338,10 +1338,21 @@ function sortRecentMessagesNewestFirst(messages: RecentThreadMessage[]): RecentT
 function getRecentMessageCursor(message: RecentThreadMessage | null): string {
   if (!message) return "";
 
+  const msgId = String(message.data?.msgId ?? "").trim();
+  if (msgId) return msgId;
+
   const actionId = String(message.data?.actionId ?? "").trim();
   if (actionId) return actionId;
 
-  return String(message.data?.msgId ?? "").trim();
+  return String(message.data?.cliMsgId ?? "").trim();
+}
+
+function getRecentPageCursor(messages: RecentThreadMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const cursor = getRecentMessageCursor(messages[index] ?? null);
+    if (cursor) return cursor;
+  }
+  return "";
 }
 
 async function fetchRecentGroupMessagesViaApi(
@@ -1350,14 +1361,149 @@ async function fetchRecentGroupMessagesViaApi(
   count: number,
 ): Promise<RecentThreadMessage[]> {
   const historyApi = (api as GroupHistoryCapableApi).getGroupChatHistory;
-  if (typeof historyApi !== "function") {
-    throw new Error(
-      "Current zca-js build does not expose getGroupChatHistory(). Upgrade zca-js/openzca.",
-    );
+  if (typeof historyApi === "function") {
+    try {
+      const response = await historyApi(threadId, count);
+      const messages = Array.isArray(response?.groupMsgs) ? response.groupMsgs : [];
+      return sortRecentMessagesNewestFirst(messages).slice(0, count);
+    } catch {
+      // Fall back to websocket history path when direct group history API fails.
+    }
   }
-  const response = await historyApi(threadId, count);
-  const messages = Array.isArray(response?.groupMsgs) ? response.groupMsgs : [];
-  return sortRecentMessagesNewestFirst(messages).slice(0, count);
+  return fetchRecentGroupMessagesViaListener(api, threadId, count);
+}
+
+async function fetchRecentGroupMessagesViaListener(
+  api: API,
+  threadId: string,
+  count: number,
+): Promise<RecentThreadMessage[]> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const collected: RecentThreadMessage[] = [];
+    const seenMessageKeys = new Set<string>();
+    const requestedCursors = new Set<string>();
+    const maxPages = parsePositiveIntFromEnv("OPENZCA_RECENT_GROUP_MAX_PAGES", 20);
+    let pagesRequested = 0;
+
+    const toKey = (message: RecentThreadMessage): string => {
+      const msgId = String(message.data?.msgId ?? "");
+      const cliMsgId = String(message.data?.cliMsgId ?? "");
+      return `${msgId}:${cliMsgId}`;
+    };
+
+    const requestPage = (lastId: string | null) => {
+      const cursor = String(lastId ?? "").trim();
+      if (cursor) {
+        if (requestedCursors.has(cursor)) return false;
+        requestedCursors.add(cursor);
+      }
+      pagesRequested += 1;
+      api.listener.requestOldMessages(ThreadType.Group, cursor || null);
+      return true;
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      api.listener.off("connected", onConnected);
+      api.listener.off("old_messages", onOldMessages);
+      api.listener.off("error", onError);
+      api.listener.off("closed", onClosed);
+
+      try {
+        api.listener.stop();
+      } catch {
+        // ignore
+      }
+    };
+
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(sortRecentMessagesNewestFirst(collected).slice(0, count));
+    };
+
+    const onConnected = () => {
+      try {
+        requestPage(null);
+      } catch (error) {
+        finish(error);
+      }
+    };
+
+    const onOldMessages = (messages: unknown[], type: ThreadType) => {
+      if (type !== ThreadType.Group) return;
+
+      const typedMessages = messages as RecentThreadMessage[];
+
+      for (const message of typedMessages) {
+        if (message.threadId === threadId) {
+          const key = toKey(message);
+          if (seenMessageKeys.has(key)) continue;
+          seenMessageKeys.add(key);
+          collected.push(message);
+        }
+      }
+
+      if (collected.length >= count) {
+        finish();
+        return;
+      }
+
+      if (typedMessages.length === 0) {
+        finish();
+        return;
+      }
+
+      if (pagesRequested >= maxPages) {
+        finish();
+        return;
+      }
+
+      const nextCursor = getRecentPageCursor(typedMessages);
+      if (!nextCursor) {
+        finish();
+        return;
+      }
+
+      try {
+        const requested = requestPage(nextCursor);
+        if (!requested) {
+          finish();
+        }
+      } catch (error) {
+        finish(error);
+      }
+    };
+
+    const onError = (error: unknown) => {
+      finish(error);
+    };
+
+    const onClosed = () => {
+      finish();
+    };
+
+    const timeoutId = setTimeout(() => {
+      finish();
+    }, 12_000);
+
+    api.listener.on("connected", onConnected);
+    api.listener.on("old_messages", onOldMessages);
+    api.listener.on("error", onError);
+    api.listener.on("closed", onClosed);
+
+    try {
+      api.listener.start();
+    } catch (error) {
+      finish(error);
+    }
+  });
 }
 
 async function fetchRecentUserMessagesViaListener(
@@ -1452,18 +1598,7 @@ async function fetchRecentUserMessagesViaListener(
         return;
       }
 
-      let oldest: RecentThreadMessage | null = null;
-      for (const message of typedMessages) {
-        if (!oldest) {
-          oldest = message;
-          continue;
-        }
-        if (parseRecentMessageTs(message.data?.ts) < parseRecentMessageTs(oldest.data?.ts)) {
-          oldest = message;
-        }
-      }
-
-      const nextCursor = getRecentMessageCursor(oldest);
+      const nextCursor = getRecentPageCursor(typedMessages);
       if (!nextCursor) {
         finish();
         return;
@@ -3305,7 +3440,7 @@ msg
   .option("-g, --group", "List recent messages for group thread")
   .option("-n, --count <count>", "Number of messages (default: 20)", "20")
   .option("-j, --json", "JSON output")
-  .description("List recent messages (group uses direct history API)")
+  .description("List recent messages (group uses direct history API when available)")
   .action(
     wrapAction(
       async (
