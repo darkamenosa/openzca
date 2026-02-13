@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-openzca is a Node.js CLI for Zalo messaging (command-compatible with zca-cli.dev/docs), built on the [zca-js](https://github.com/nicenathapong/zca-js) library. It provides commands for authentication, messaging, group/friend management, profile updates, and real-time message listening. Installed globally via npm as `openzca` or `zca`.
+openzca is a Node.js CLI for Zalo messaging (command-compatible with zca-cli.dev/docs), built on the [zca-js](https://github.com/RFS-ADRENO/zca-js) library. It provides commands for authentication, messaging, group/friend management, profile updates, and real-time message listening. Installed globally via npm as `openzca` or `zca`.
 
 ## Commands
 
@@ -35,9 +35,9 @@ Key patterns:
 - The `listen` command is the most complex — handles WebSocket reconnection, media downloading, supervised mode lifecycle events, and raw JSON output enrichment.
 - All Zalo API calls go through `zca-js` types (`API`, `Credentials`, `Zalo`, etc.).
 
-## OpenClaw Zalouser Plugin Compatibility
+## OpenClaw OpenZalo / ZaloUser Plugin Compatibility
 
-openzca is the CLI backend for the **zalouser** OpenClaw channel plugin. The plugin spawns `zca`/`openzca` as a subprocess for all Zalo operations. Any CLI changes must remain compatible with how the plugin calls the binary.
+openzca is the CLI backend for the OpenClaw OpenZalo channel plugin and its legacy `zalouser` variant. The plugin spawns `openzca` as a subprocess for all Zalo operations. Any CLI changes must remain compatible with how the plugin calls the binary.
 
 ### How the plugin calls openzca
 
@@ -71,7 +71,8 @@ These limitations will be addressed in a new improved plugin. When adding featur
 
 Key env vars used at runtime (not for development):
 - `OPENZCA_HOME` — override default `~/.openzca` data directory
-- `ZCA_PROFILE` — select active profile without `--profile` flag
+- `OPENZCA_PROFILE` — select active profile without `--profile` flag
+- `ZCA_PROFILE` — legacy profile env var alias (kept for backward compatibility)
 - `OPENZCA_DEBUG=1` — enable debug logging
 - `OPENZCA_LISTEN_*` — various listener config (media dir, timeouts, recycle intervals)
 - `OPENCLAW_STATE_DIR` / `CLAWDBOT_STATE_DIR` — OpenClaw integration media storage path
