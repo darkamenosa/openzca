@@ -278,6 +278,11 @@ Listener resilience override:
 - `OPENZCA_LISTEN_IPC`: expose local IPC socket from `listen` so `msg upload` can reuse the active websocket session.
   - Default: enabled.
   - Set to `0` to disable IPC.
+- `OPENZCA_LISTEN_KEEPALIVE_RESTART_DELAY_MS`: when `--keep-alive` is on, restart listener after close code `1000`/`3000` with this delay.
+  - Default: `2000`.
+- `OPENZCA_LISTEN_KEEPALIVE_RESTART_ON_ANY_CLOSE`: force keepalive fallback restart for any close code.
+  - Default: disabled.
+  - Set to `1` if your environment closes with non-retry codes.
 
 Supervised mode notes:
 

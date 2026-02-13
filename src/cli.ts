@@ -4206,6 +4206,14 @@ program
           30_000;
         const lifecycleEventsEnabled = supervised && Boolean(opts.raw);
         const recycleEnabled = !supervised && Boolean(opts.keepAlive) && recycleMs > 0;
+        const keepAliveRestartDelayMs = parsePositiveIntFromEnv(
+          "OPENZCA_LISTEN_KEEPALIVE_RESTART_DELAY_MS",
+          2_000,
+        );
+        const keepAliveRestartOnAnyClose = parseBooleanFromEnv(
+          "OPENZCA_LISTEN_KEEPALIVE_RESTART_ON_ANY_CLOSE",
+          false,
+        );
         const recycleExitCode = 75;
         const includeReplyContext = parseToggleDefaultTrue(
           process.env.OPENZCA_LISTEN_INCLUDE_QUOTE_CONTEXT,
@@ -4287,6 +4295,12 @@ program
               maxMediaFiles: parseMaxInboundMediaFiles(),
               includeMediaUrl: process.env.OPENZCA_LISTEN_INCLUDE_MEDIA_URL?.trim() ?? null,
               keepAlive: Boolean(opts.keepAlive),
+              keepAliveRestartDelayMs: Boolean(opts.keepAlive)
+                ? keepAliveRestartDelayMs
+                : undefined,
+              keepAliveRestartOnAnyClose: Boolean(opts.keepAlive)
+                ? keepAliveRestartOnAnyClose
+                : undefined,
               supervised,
               lifecycleEventsEnabled,
               heartbeatMs: lifecycleEventsEnabled ? heartbeatMs : undefined,
@@ -4301,40 +4315,46 @@ program
           );
           emitLifecycle("session_id");
 
-        async function emitWebhook(payload: Record<string, unknown>): Promise<void> {
-          if (!opts.webhook) return;
-          try {
-            const response = await fetch(opts.webhook, {
-              method: "POST",
-              headers: {
-                "content-type": "application/json",
-              },
-              body: JSON.stringify(payload),
-            });
-            if (!response.ok) {
-              console.error(`Webhook response: ${response.status}`);
+          let keepAliveRestartTimer: ReturnType<typeof setTimeout> | null = null;
+
+          async function emitWebhook(payload: Record<string, unknown>): Promise<void> {
+            if (!opts.webhook) return;
+            try {
+              const response = await fetch(opts.webhook, {
+                method: "POST",
+                headers: {
+                  "content-type": "application/json",
+                },
+                body: JSON.stringify(payload),
+              });
+              if (!response.ok) {
+                console.error(`Webhook response: ${response.status}`);
+              }
+            } catch (error) {
+              console.error(
+                `Webhook failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
             }
-          } catch (error) {
-            console.error(
-              `Webhook failed: ${error instanceof Error ? error.message : String(error)}`,
-            );
           }
-        }
 
-        api.listener.on("connected", () => {
-          console.log("Connected to Zalo websocket.");
-          writeDebugLine(
-            "listen.connected",
-            {
-              profile,
-              sessionId,
-            },
-            command,
-          );
-          emitLifecycle("connected");
-        });
+          api.listener.on("connected", () => {
+            console.log("Connected to Zalo websocket.");
+            if (keepAliveRestartTimer) {
+              clearTimeout(keepAliveRestartTimer);
+              keepAliveRestartTimer = null;
+            }
+            writeDebugLine(
+              "listen.connected",
+              {
+                profile,
+                sessionId,
+              },
+              command,
+            );
+            emitLifecycle("connected");
+          });
 
-        api.listener.on("message", async (message) => {
+          api.listener.on("message", async (message) => {
           const messageData = message.data as Record<string, unknown>;
           const rawContent = messageData.content;
           const msgType = getStringCandidate(messageData, ["msgType"]);
@@ -4604,76 +4624,122 @@ program
               );
             }
           }
-        });
-
-        api.listener.on("error", (error) => {
-          writeDebugLine(
-            "listen.error",
-            {
-              profile,
-              message: error instanceof Error ? error.message : String(error),
-              sessionId,
-            },
-            command,
-          );
-          emitLifecycle("error", {
-            message: error instanceof Error ? error.message : String(error),
           });
-          console.error(
-            `Listener error: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        });
 
-          await new Promise<void>((resolve) => {
-          let settled = false;
-          let recycleTimer: ReturnType<typeof setTimeout> | null = null;
-          let recycleForceExitTimer: ReturnType<typeof setTimeout> | null = null;
-          let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-          let recyclePendingExit = false;
-          let unregisterShutdown = () => {};
-
-          const finish = () => {
-            if (settled) return;
-            settled = true;
-            if (recycleTimer) {
-              clearTimeout(recycleTimer);
-              recycleTimer = null;
-            }
-            if (recycleForceExitTimer && !recyclePendingExit) {
-              clearTimeout(recycleForceExitTimer);
-              recycleForceExitTimer = null;
-            }
-            if (heartbeatTimer) {
-              clearInterval(heartbeatTimer);
-              heartbeatTimer = null;
-            }
-            unregisterShutdown();
-            unregisterShutdown = () => {};
-            resolve();
-          };
-
-          api.listener.on("closed", (code, reason) => {
-            console.log(`Listener closed (${code}) ${reason || ""}`);
+          api.listener.on("error", (error) => {
             writeDebugLine(
-              "listen.closed",
+              "listen.error",
               {
                 profile,
-                code,
-                reason: reason || undefined,
+                message: error instanceof Error ? error.message : String(error),
                 sessionId,
               },
               command,
             );
-            emitLifecycle("closed", {
-              code,
-              reason: reason || undefined,
+            emitLifecycle("error", {
+              message: error instanceof Error ? error.message : String(error),
             });
-            // In keep-alive mode, zca-js handles reconnect internally.
-            // Do not terminate the process on transient close events.
-            if (!opts.keepAlive || supervised) {
-              finish();
-            }
+            console.error(
+              `Listener error: ${error instanceof Error ? error.message : String(error)}`,
+            );
           });
+
+          await new Promise<void>((resolve) => {
+            let settled = false;
+            let recycleTimer: ReturnType<typeof setTimeout> | null = null;
+            let recycleForceExitTimer: ReturnType<typeof setTimeout> | null = null;
+            let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+            let recyclePendingExit = false;
+            let unregisterShutdown = () => {};
+
+            const finish = () => {
+              if (settled) return;
+              settled = true;
+              if (recycleTimer) {
+                clearTimeout(recycleTimer);
+                recycleTimer = null;
+              }
+              if (recycleForceExitTimer && !recyclePendingExit) {
+                clearTimeout(recycleForceExitTimer);
+                recycleForceExitTimer = null;
+              }
+              if (heartbeatTimer) {
+                clearInterval(heartbeatTimer);
+                heartbeatTimer = null;
+              }
+              if (keepAliveRestartTimer) {
+                clearTimeout(keepAliveRestartTimer);
+                keepAliveRestartTimer = null;
+              }
+              unregisterShutdown();
+              unregisterShutdown = () => {};
+              resolve();
+            };
+
+            api.listener.on("closed", (code, reason) => {
+              console.log(`Listener closed (${code}) ${reason || ""}`);
+              writeDebugLine(
+                "listen.closed",
+                {
+                  profile,
+                  code,
+                  reason: reason || undefined,
+                  sessionId,
+                },
+                command,
+              );
+              emitLifecycle("closed", {
+                code,
+                reason: reason || undefined,
+              });
+              // In keep-alive mode, zca-js handles reconnect internally.
+              // For NORMAL_CLOSURE / duplicate connection, enforce restart fallback
+              // because server-provided retry code lists can omit those codes.
+              if (!opts.keepAlive || supervised) {
+                finish();
+                return;
+              }
+
+              const shouldRestart =
+                keepAliveRestartOnAnyClose || code === 1000 || code === 3000;
+              if (!shouldRestart) return;
+
+              if (keepAliveRestartTimer) {
+                clearTimeout(keepAliveRestartTimer);
+              }
+              keepAliveRestartTimer = setTimeout(() => {
+                keepAliveRestartTimer = null;
+                writeDebugLine(
+                  "listen.keepalive.restart",
+                  {
+                    profile,
+                    code,
+                    reason: reason || undefined,
+                    delayMs: keepAliveRestartDelayMs,
+                    sessionId,
+                  },
+                  command,
+                );
+                try {
+                  api.listener.start({ retryOnClose: true });
+                } catch (error) {
+                  if (!isListenerAlreadyStarted(error)) {
+                    writeDebugLine(
+                      "listen.keepalive.restart_error",
+                      {
+                        profile,
+                        code,
+                        reason: reason || undefined,
+                        delayMs: keepAliveRestartDelayMs,
+                        message: toErrorText(error),
+                        sessionId,
+                      },
+                      command,
+                    );
+                  }
+                }
+              }, keepAliveRestartDelayMs);
+            });
 
           const onSignal = () => {
             try {
