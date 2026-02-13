@@ -355,6 +355,163 @@ async function refreshCacheForProfile(profile: string, api: API): Promise<{ frie
   };
 }
 
+function parsePositiveIntFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+function isListenerAlreadyStarted(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /already started/i.test(error.message);
+}
+
+function toErrorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<T>((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+    });
+    return await Promise.race([task, timeout]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+async function withUploadListener<T>(
+  api: API,
+  command: Command | undefined,
+  task: () => Promise<T>,
+): Promise<T> {
+  const connectTimeoutMs = parsePositiveIntFromEnv(
+    "OPENZCA_UPLOAD_LISTENER_CONNECT_TIMEOUT_MS",
+    8_000,
+  );
+  const uploadTimeoutMs = parsePositiveIntFromEnv(
+    "OPENZCA_UPLOAD_TIMEOUT_MS",
+    120_000,
+  );
+
+  let startedHere = false;
+
+  const sinkError = (error: unknown) => {
+    writeDebugLine(
+      "msg.upload.listener.error",
+      {
+        message: toErrorText(error),
+      },
+      command,
+    );
+  };
+  const sinkClosed = (code: number, reason: string) => {
+    writeDebugLine(
+      "msg.upload.listener.closed",
+      {
+        code,
+        reason: reason || undefined,
+      },
+      command,
+    );
+  };
+
+  api.listener.on("error", sinkError);
+  api.listener.on("closed", sinkClosed);
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+      const cleanup = () => {
+        if (timeoutId) clearTimeout(timeoutId);
+        api.listener.off("connected", onConnected);
+        api.listener.off("error", onConnectError);
+        api.listener.off("closed", onConnectClosed);
+      };
+
+      const finish = (error?: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      };
+
+      const onConnected = () => {
+        writeDebugLine("msg.upload.listener.connected", undefined, command);
+        finish();
+      };
+
+      const onConnectError = (error: unknown) => {
+        finish(new Error(`Upload listener connection error: ${toErrorText(error)}`));
+      };
+
+      const onConnectClosed = (code: number, reason: string) => {
+        finish(
+          new Error(
+            `Upload listener closed before ready (code=${code}${reason ? `, reason=${reason}` : ""}).`,
+          ),
+        );
+      };
+
+      timeoutId = setTimeout(() => {
+        finish(new Error(`Timed out waiting ${connectTimeoutMs}ms for upload listener connection.`));
+      }, connectTimeoutMs);
+
+      api.listener.on("connected", onConnected);
+      api.listener.on("error", onConnectError);
+      api.listener.on("closed", onConnectClosed);
+
+      try {
+        api.listener.start();
+        startedHere = true;
+        writeDebugLine(
+          "msg.upload.listener.start",
+          {
+            connectTimeoutMs,
+            uploadTimeoutMs,
+          },
+          command,
+        );
+      } catch (error) {
+        if (isListenerAlreadyStarted(error)) {
+          writeDebugLine("msg.upload.listener.already_started", undefined, command);
+          finish();
+          return;
+        }
+        finish(error);
+      }
+    });
+
+    return await withTimeout(
+      task(),
+      uploadTimeoutMs,
+      `Timed out waiting ${uploadTimeoutMs}ms for file upload completion.`,
+    );
+  } finally {
+    api.listener.off("error", sinkError);
+    api.listener.off("closed", sinkClosed);
+
+    if (startedHere) {
+      try {
+        api.listener.stop();
+        writeDebugLine("msg.upload.listener.stop", undefined, command);
+      } catch {
+        // ignore cleanup errors
+      }
+    }
+  }
+}
+
 async function fetchRecentMessagesViaListener(
   api: API,
   threadId: string,
@@ -2201,13 +2358,15 @@ msg
           }
           await assertFilesExist(attachments);
 
-          const response = await api.sendMessage(
-            {
-              msg: "",
-              attachments,
-            },
-            threadId,
-            asThreadType(opts.group),
+          const response = await withUploadListener(api, command, async () =>
+            api.sendMessage(
+              {
+                msg: "",
+                attachments,
+              },
+              threadId,
+              asThreadType(opts.group),
+            ),
           );
           output(response, false);
         } finally {
