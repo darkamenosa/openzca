@@ -302,7 +302,7 @@ async function currentProfile(_command?: Command): Promise<string> {
 async function profileForLogin(): Promise<string> {
   const opts = program.opts() as { profile?: string };
   const explicit = opts.profile?.trim();
-  const fromEnv = process.env.ZCA_PROFILE?.trim();
+  const fromEnv = process.env.OPENZCA_PROFILE?.trim() || process.env.ZCA_PROFILE?.trim();
 
   if (explicit) {
     await ensureProfile(explicit);
@@ -1480,7 +1480,7 @@ program.hook("preAction", (_parent, actionCommand) => {
       argv: process.argv.slice(2),
       cwd: process.cwd(),
       profileFlag: getDebugOptions(actionCommand).profile ?? null,
-      envProfile: process.env.ZCA_PROFILE ?? null,
+      envProfile: process.env.OPENZCA_PROFILE ?? process.env.ZCA_PROFILE ?? null,
     },
     actionCommand,
   );
@@ -2122,6 +2122,44 @@ msg
   );
 
 msg
+  .command("edit <msgId> <cliMsgId> <threadId> <message>")
+  .option("-g, --group", "Edit in group")
+  .description("Edit message (compatibility shim: recall old message then resend new text)")
+  .action(
+    wrapAction(
+      async (
+        msgId: string,
+        cliMsgId: string,
+        threadId: string,
+        message: string,
+        opts: { group?: boolean },
+        command: Command,
+      ) => {
+        const { api } = await requireApi(command);
+        const type = asThreadType(opts.group);
+        const undoResponse = await api.undo(
+          {
+            msgId,
+            cliMsgId,
+          },
+          threadId,
+          type,
+        );
+        const sendResponse = await api.sendMessage(message, threadId, type);
+        output(
+          {
+            mode: "undo+send",
+            nativeEditSupported: false,
+            undo: undoResponse,
+            send: sendResponse,
+          },
+          false,
+        );
+      },
+    ),
+  );
+
+msg
   .command("upload <arg1> [arg2]")
   .option("-u, --url <url>", "File URL (repeatable)", collectValues, [] as string[])
   .option("-g, --group", "Upload in group")
@@ -2234,6 +2272,101 @@ msg
         output(rows, false);
       },
     ),
+  );
+
+msg
+  .command("pin <threadId>")
+  .option("-g, --group", "Pin group conversation")
+  .description("Pin conversation")
+  .action(
+    wrapAction(async (threadId: string, opts: { group?: boolean }, command: Command) => {
+      const { api } = await requireApi(command);
+      const type = asThreadType(opts.group);
+      const response = await api.setPinnedConversations(true, threadId, type);
+      output(
+        {
+          threadId,
+          threadType: type === ThreadType.Group ? "group" : "user",
+          pinned: true,
+          response,
+        },
+        false,
+      );
+    }),
+  );
+
+msg
+  .command("unpin <threadId>")
+  .option("-g, --group", "Unpin group conversation")
+  .description("Unpin conversation")
+  .action(
+    wrapAction(async (threadId: string, opts: { group?: boolean }, command: Command) => {
+      const { api } = await requireApi(command);
+      const type = asThreadType(opts.group);
+      const response = await api.setPinnedConversations(false, threadId, type);
+      output(
+        {
+          threadId,
+          threadType: type === ThreadType.Group ? "group" : "user",
+          pinned: false,
+          response,
+        },
+        false,
+      );
+    }),
+  );
+
+msg
+  .command("list-pins")
+  .option("-j, --json", "JSON output")
+  .description("List pinned conversations")
+  .action(
+    wrapAction(async (opts: { json?: boolean }, command: Command) => {
+      const { api } = await requireApi(command);
+      const response = await api.getPinConversations();
+      if (opts.json) {
+        output(response, true);
+        return;
+      }
+      output(
+        response.conversations.map((threadId) => ({
+          threadId,
+          pinned: true,
+        })),
+        false,
+      );
+    }),
+  );
+
+msg
+  .command("member-info <userId>")
+  .option("-j, --json", "JSON output")
+  .description("Get member/user profile info")
+  .action(
+    wrapAction(async (userId: string, opts: { json?: boolean }, command: Command) => {
+      const { api } = await requireApi(command);
+      const response = await api.getUserInfo(userId);
+      if (opts.json) {
+        output(response, true);
+        return;
+      }
+
+      const profiles = (response.changed_profiles ?? {}) as Record<string, Record<string, unknown>>;
+      const matchedProfile =
+        profiles[userId] ??
+        profiles[`${userId}_0`] ??
+        Object.values(profiles)[0] ??
+        null;
+
+      output(
+        {
+          userId,
+          found: Boolean(matchedProfile),
+          profile: matchedProfile,
+        },
+        false,
+      );
+    }),
   );
 
 const group = program.command("group").description("Group management");

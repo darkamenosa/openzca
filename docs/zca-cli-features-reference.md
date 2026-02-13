@@ -167,4 +167,4 @@ openzca listen --echo --keep-alive
 ## Notes for Future Maintenance
 - If `zca-cli` docs change, re-snapshot and diff command/options against this file.
 - Keep command aliases in sync (`account ls/l`, `account whoami`, `account use`, etc.).
-- Keep profile resolution order consistent: `--profile` > `ZCA_PROFILE` > default profile.
+- Keep profile resolution order consistent: `--profile` > `OPENZCA_PROFILE` > `ZCA_PROFILE` (legacy) > default profile.

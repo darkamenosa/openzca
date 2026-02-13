@@ -185,7 +185,7 @@ export async function resolveProfileName(flagProfile?: string): Promise<string> 
 
   const picked =
     (flagProfile && flagProfile.trim()) ||
-    (process.env.ZCA_PROFILE && process.env.ZCA_PROFILE.trim()) ||
+    (process.env.OPENZCA_PROFILE?.trim() || process.env.ZCA_PROFILE?.trim()) ||
     db.defaultProfile ||
     DEFAULT_PROFILE;
 
@@ -254,4 +254,3 @@ export async function clearCache(profileName: string): Promise<void> {
   await fs.rm(getGroupsCachePath(profileName), { force: true });
   await fs.rm(getCacheMetaPath(profileName), { force: true });
 }
-

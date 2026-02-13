@@ -1,13 +1,8 @@
 # openzca
 
-Free and open-source CLI for Zalo, built on [zca-js](https://github.com/nicenathapong/zca-js). Command structure compatible with [zca-cli.dev/docs](https://zca-cli.dev/docs).
+Free and open-source CLI for Zalo, built on [zca-js](https://github.com/RFS-ADRENO/zca-js). Command structure compatible with [zca-cli.dev/docs](https://zca-cli.dev/docs).
 
-## Integrate with OpenClaw ZaloUser plugin
-
-Prompt:
-```
-help me to enable zalouser openclaw plugin. However, don't install zca cli follow their instruction, please use: npm install -g openzca@latest
-```
+## Integrate with OpenClaw OpenZalo plugin (including legacy `zalouser`)
 
 
 ## Install
@@ -296,7 +291,7 @@ Supervised mode notes:
 
 ## Multi-account profiles
 
-Use `--profile <name>` or set `ZCA_PROFILE=<name>` to switch between accounts. Manage profiles with the `account` commands.
+Use `--profile <name>` or set `OPENZCA_PROFILE=<name>` (or legacy `ZCA_PROFILE=<name>`) to switch between accounts. Manage profiles with the `account` commands.
 
 Profile data is stored in `~/.openzca/` (override with `OPENZCA_HOME`):
 
