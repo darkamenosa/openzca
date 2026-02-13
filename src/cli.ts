@@ -372,6 +372,77 @@ function toErrorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const SHUTDOWN_CALLBACKS = new Set<() => void | Promise<void>>();
+let shutdownSignalReceived: NodeJS.Signals | null = null;
+let shutdownRunning = false;
+
+function signalExitCode(signal: NodeJS.Signals): number {
+  if (signal === "SIGINT") return 130;
+  if (signal === "SIGTERM") return 143;
+  return 1;
+}
+
+function registerShutdownCallback(callback: () => void | Promise<void>): () => void {
+  SHUTDOWN_CALLBACKS.add(callback);
+  return () => {
+    SHUTDOWN_CALLBACKS.delete(callback);
+  };
+}
+
+async function runShutdownCallbacks(signal: NodeJS.Signals): Promise<void> {
+  if (shutdownRunning) return;
+  shutdownRunning = true;
+
+  const callbacks = Array.from(SHUTDOWN_CALLBACKS);
+  SHUTDOWN_CALLBACKS.clear();
+
+  writeDebugLine(
+    "process.signal",
+    {
+      signal,
+      callbackCount: callbacks.length,
+    },
+    undefined,
+  );
+
+  for (const callback of callbacks) {
+    try {
+      await Promise.resolve(callback());
+    } catch (error) {
+      writeDebugLine(
+        "process.signal.callback_error",
+        {
+          signal,
+          message: toErrorText(error),
+        },
+        undefined,
+      );
+    }
+  }
+}
+
+function installSignalHandler(signal: NodeJS.Signals): void {
+  process.on(signal, () => {
+    if (shutdownSignalReceived) return;
+    shutdownSignalReceived = signal;
+
+    const exitCode = signalExitCode(signal);
+    const forceExitMs = parsePositiveIntFromEnv("OPENZCA_SIGNAL_FORCE_EXIT_MS", 1_500);
+    const forceTimer = setTimeout(() => {
+      process.exit(exitCode);
+    }, forceExitMs);
+    forceTimer.unref();
+
+    void runShutdownCallbacks(signal).finally(() => {
+      clearTimeout(forceTimer);
+      process.exit(exitCode);
+    });
+  });
+}
+
+installSignalHandler("SIGINT");
+installSignalHandler("SIGTERM");
+
 async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -443,6 +514,9 @@ async function withUploadListener<T>(
   );
 
   let startedHere = false;
+  const unregisterSignalCleanup = registerShutdownCallback(async () => {
+    await stopUploadListenerSafely(api, command);
+  });
 
   const sinkError = (error: unknown) => {
     writeDebugLine(
@@ -546,6 +620,7 @@ async function withUploadListener<T>(
       await stopUploadListenerSafely(api, command);
     }
 
+    unregisterSignalCleanup();
     api.listener.off("error", sinkError);
     api.listener.off("closed", sinkClosed);
   }
@@ -3805,6 +3880,7 @@ program
           let recycleForceExitTimer: ReturnType<typeof setTimeout> | null = null;
           let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
           let recyclePendingExit = false;
+          let unregisterShutdown = () => {};
 
           const finish = () => {
             if (settled) return;
@@ -3821,6 +3897,8 @@ program
               clearInterval(heartbeatTimer);
               heartbeatTimer = null;
             }
+            unregisterShutdown();
+            unregisterShutdown = () => {};
             resolve();
           };
 
@@ -3847,7 +3925,7 @@ program
             }
           });
 
-          const onSigint = () => {
+          const onSignal = () => {
             try {
               api.listener.stop();
             } catch {
@@ -3855,6 +3933,8 @@ program
             }
             finish();
           };
+
+          unregisterShutdown = registerShutdownCallback(onSignal);
 
           if (lifecycleEventsEnabled && heartbeatMs > 0) {
             heartbeatTimer = setInterval(() => {
@@ -3897,7 +3977,6 @@ program
             }, recycleMs);
           }
 
-          process.once("SIGINT", onSigint);
           api.listener.start({ retryOnClose: supervised ? false : Boolean(opts.keepAlive) });
         });
       },
