@@ -1326,6 +1326,10 @@ function parseRecentMessageTs(value: unknown): number {
     if (Number.isFinite(parsed)) {
       return Math.trunc(parsed);
     }
+    const parsedDate = Date.parse(trimmed);
+    if (Number.isFinite(parsedDate)) {
+      return Math.trunc(parsedDate);
+    }
   }
   return 0;
 }
@@ -3591,10 +3595,18 @@ msg
         const rows = messages.map((message) => ({
           msgId: message.data.msgId,
           cliMsgId: message.data.cliMsgId,
+          threadId: message.threadId || threadId,
+          threadType: message.type === ThreadType.Group ? "group" : "user",
           senderId: message.data.uidFrom,
           senderName: message.data.dName,
           ts: message.data.ts,
           msgType: message.data.msgType,
+          undo: {
+            msgId: message.data.msgId,
+            cliMsgId: message.data.cliMsgId,
+            threadId: message.threadId || threadId,
+            group: message.type === ThreadType.Group,
+          },
           content:
             typeof message.data.content === "string"
               ? message.data.content
