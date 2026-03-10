@@ -274,9 +274,16 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
   for (let i = 0; i < lines.length; i++) {
     let line = lines[i];
 
-    // Skip formatting for code block lines — preserve content as-is
+    // Code block lines — convert leading whitespace to Indent (Zalo strips spaces)
     if (codeLineIndices.has(i)) {
-      processedLines.push(line);
+      const codeIndentMatch = line.match(/^(\s+)(.*)$/);
+      if (codeIndentMatch) {
+        const codeIndent = Math.min(5, Math.max(1, Math.floor(codeIndentMatch[1].length / 2)));
+        lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: codeIndent });
+        processedLines.push(codeIndentMatch[2]);
+      } else {
+        processedLines.push(line);
+      }
       continue;
     }
 
@@ -294,23 +301,26 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
     // Blockquotes: > prefix (before list detection so "> - item" works)
     const bqMatch = line.match(/^(>+)\s?(.*)$/);
     if (bqMatch) {
-      lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: bqMatch[1].length });
+      lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: Math.min(5, bqMatch[1].length) });
       line = bqMatch[2];
       // Fall through to check if remaining content is a list item
     }
 
-    // Detect leading whitespace — only used for nested list indentation
+    // Detect leading whitespace → Indent style (Zalo strips actual spaces)
     const indentContentMatch = line.match(/^(\s+)(.*)$/);
     let indentLevel = 0;
     let content = line;
     if (indentContentMatch) {
-      indentLevel = Math.max(1, Math.floor(indentContentMatch[1].length / 2));
+      indentLevel = Math.min(5, Math.max(1, Math.floor(indentContentMatch[1].length / 2)));
       content = indentContentMatch[2];
     }
 
     // Checkbox lines: - [x] or - [ ] — keep as-is, do not parse as list
     if (/^[-*+]\s\[[ xX]\]\s/.test(content)) {
-      processedLines.push(line);
+      if (indentLevel > 0) {
+        lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: indentLevel });
+      }
+      processedLines.push(content);
       continue;
     }
 
@@ -336,7 +346,13 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
       continue;
     }
 
-    // Plain text with leading whitespace — preserve as-is (no Indent style)
+    // Plain text with leading whitespace → Indent (Zalo strips actual spaces)
+    if (indentLevel > 0) {
+      lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: indentLevel });
+      processedLines.push(content);
+      continue;
+    }
+
     processedLines.push(line);
   }
 
@@ -369,12 +385,12 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
     { pattern: new RegExp(`\\{(${tagNames})\\}(.+?)\\{/\\1\\}`, "g"), style: null },
     // *** = bold + italic
     { pattern: /\*\*\*(.+?)\*\*\*/g, style: TextStyle.Bold, extraStyles: [TextStyle.Italic] },
-    // ** and __ = bold (standard markdown)
+    // ** and __ = bold (standard markdown; __ requires word boundaries)
     { pattern: /\*\*(.+?)\*\*/g, style: TextStyle.Bold },
-    { pattern: /__(.+?)__/g, style: TextStyle.Bold },
-    // * and _ = italic (standard markdown)
+    { pattern: /(?<!\w)__(.+?)__(?!\w)/g, style: TextStyle.Bold },
+    // * and _ = italic (_ requires word boundaries to avoid snake_case)
     { pattern: /\*(.+?)\*/g, style: TextStyle.Italic },
-    { pattern: /_(.+?)_/g, style: TextStyle.Italic },
+    { pattern: /(?<!\w)_(.+?)_(?!\w)/g, style: TextStyle.Italic },
     // ~~ = strikethrough
     { pattern: /~~(.+?)~~/g, style: TextStyle.StrikeThrough },
   ];
@@ -419,6 +435,36 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
     plainText += seg.text;
     for (const st of seg.styles) {
       allStyles.push({ start, len: seg.text.length, st } as Style);
+    }
+  }
+
+  // --- Phase 2b: fix orphaned *..* pairs from cross-segment nesting ---
+  // e.g. *italic **bold** italic* → after ** processing, outer * are orphaned.
+  // Scan plainText for remaining *..* or _.._ pairs and apply italic.
+  const orphanRegex = /\*([^*\n]+?)\*/g;
+  const orphanMatches = [...plainText.matchAll(orphanRegex)];
+  // Process from right to left so earlier offsets aren't affected
+  for (let oi = orphanMatches.length - 1; oi >= 0; oi--) {
+    const om = orphanMatches[oi];
+    const openPos = om.index!;
+    const content = om[1];
+    const closePos = openPos + content.length + 1;
+
+    // Add italic style for the inner content (starts after the opening *)
+    allStyles.push({ start: openPos + 1, len: content.length, st: TextStyle.Italic } as Style);
+
+    // Remove the two * delimiters from plainText
+    plainText = plainText.slice(0, closePos) + plainText.slice(closePos + 1);
+    plainText = plainText.slice(0, openPos) + plainText.slice(openPos + 1);
+
+    // Adjust all existing style offsets for the two removed characters
+    for (const s of allStyles) {
+      // Adjust for close removal (at closePos, but after open removal it shifts)
+      if (s.start > closePos) s.start--;
+      else if (s.start + s.len > closePos) s.len--;
+      // Adjust for open removal (at openPos)
+      if (s.start > openPos) s.start--;
+      else if (s.start + s.len > openPos) s.len--;
     }
   }
 
