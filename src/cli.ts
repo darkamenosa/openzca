@@ -214,18 +214,84 @@ function asThreadType(groupFlag?: boolean): ThreadType {
 /**
  * Parse markdown-like formatting from message text and return plain text + styles.
  *
- * Supported syntax:
- *   **bold**  *italic*  __underline__  ~~strikethrough~~
- *   ***bold+italic***
+ * Inline syntax (nestable):
+ *   **bold**  *italic*  __underline__  ~~strikethrough~~  ***bold+italic***
+ *   {red}text{/red}  {orange}...  {yellow}...  {green}...
+ *   {small}text{/small}  {big}text{/big}
+ *
+ * Line-level syntax:
+ *   # heading     → big + bold
+ *   ## heading    → bold
+ *   ### heading   → bold + small
+ *   - item        → unordered list
+ *   1. item       → ordered list
+ *   >  item       → indent (each > adds one indent level)
  *
  * Unmatched markers are left as-is.
  */
 function parseTextStyles(input: string): { text: string; styles: Style[] } {
-  const styles: Style[] = [];
+  const allStyles: Style[] = [];
 
-  // Order matters: longer markers first so ** is tried before *
-  const markers: { pattern: RegExp; style: TextStyle }[] = [
-    { pattern: /\*\*\*(.+?)\*\*\*/g, style: TextStyle.Bold },
+  // --- Phase 1: line-level styles (lists, indent) ---
+  // Process lines, strip markers, record line styles to apply after inline parsing.
+  const lines = input.split("\n");
+  const lineStyles: { lineIndex: number; style: TextStyle; indentSize?: number }[] = [];
+  const processedLines: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // Headings: # = Big+Bold, ## = Bold, ### = Bold+Small
+    const headingMatch = line.match(/^(#{1,3})\s(.*)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      lineStyles.push({ lineIndex: i, style: TextStyle.Bold });
+      if (level === 1) lineStyles.push({ lineIndex: i, style: TextStyle.Big });
+      if (level === 3) lineStyles.push({ lineIndex: i, style: TextStyle.Small });
+      processedLines.push(headingMatch[2]);
+      continue;
+    }
+    // Ordered list: "1. ", "2. ", etc.
+    const olMatch = line.match(/^(\d+)\.\s(.*)$/);
+    if (olMatch) {
+      lineStyles.push({ lineIndex: i, style: TextStyle.OrderedList });
+      processedLines.push(olMatch[2]);
+      continue;
+    }
+    // Unordered list: "- " at line start
+    const ulMatch = line.match(/^-\s(.*)$/);
+    if (ulMatch) {
+      lineStyles.push({ lineIndex: i, style: TextStyle.UnorderedList });
+      processedLines.push(ulMatch[1]);
+      continue;
+    }
+    // Indent: "> " prefix, multiple > for deeper indent
+    const indentMatch = line.match(/^(>+)\s?(.*)$/);
+    if (indentMatch) {
+      lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: indentMatch[1].length });
+      processedLines.push(indentMatch[2]);
+      continue;
+    }
+    processedLines.push(line);
+  }
+
+  // Rejoin for inline parsing
+  const inlineInput = processedLines.join("\n");
+
+  // --- Phase 2: inline styles ---
+  // Order matters: longer/more-specific markers first
+  const colorMap: Record<string, TextStyle> = {
+    red: TextStyle.Red,
+    orange: TextStyle.Orange,
+    yellow: TextStyle.Yellow,
+    green: TextStyle.Green,
+    small: TextStyle.Small,
+    big: TextStyle.Big,
+  };
+  const tagNames = Object.keys(colorMap).join("|");
+  const markers: { pattern: RegExp; style: TextStyle | null; extraStyles?: TextStyle[] }[] = [
+    // Tags first so inner markdown markers are preserved for subsequent passes
+    { pattern: new RegExp(`\\{(${tagNames})\\}(.+?)\\{/\\1\\}`, "g"), style: null },
+    { pattern: /\*\*\*(.+?)\*\*\*/g, style: TextStyle.Bold, extraStyles: [TextStyle.Italic] },
     { pattern: /\*\*(.+?)\*\*/g, style: TextStyle.Bold },
     { pattern: /\*(.+?)\*/g, style: TextStyle.Italic },
     { pattern: /__(.+?)__/g, style: TextStyle.Underline },
@@ -234,24 +300,27 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
 
   interface Segment { text: string; styles: TextStyle[] }
 
-  let segments: Segment[] = [{ text: input, styles: [] }];
+  let segments: Segment[] = [{ text: inlineInput, styles: [] }];
 
-  for (const { pattern, style } of markers) {
+  for (const marker of markers) {
     const next: Segment[] = [];
     for (const seg of segments) {
       let lastIndex = 0;
-      const regex = new RegExp(pattern.source, pattern.flags);
+      const regex = new RegExp(marker.pattern.source, marker.pattern.flags);
       let m: RegExpExecArray | null;
       while ((m = regex.exec(seg.text)) !== null) {
         if (m.index > lastIndex) {
           next.push({ text: seg.text.slice(lastIndex, m.index), styles: [...seg.styles] });
         }
-        const combined = [...seg.styles, style];
-        // *** produces both bold and italic
-        if (pattern.source.startsWith("\\*\\*\\*")) {
-          combined.push(TextStyle.Italic);
+        // For tag-based markers, capture group 1 is tag name, group 2 is content
+        const isTagPattern = marker.style === null;
+        const innerText = isTagPattern ? m[2] : m[1];
+        const resolvedStyle = isTagPattern ? colorMap[m[1]] : marker.style!;
+        const combined = [...seg.styles, resolvedStyle];
+        if (marker.extraStyles) {
+          combined.push(...marker.extraStyles);
         }
-        next.push({ text: m[1], styles: combined });
+        next.push({ text: innerText, styles: combined });
         lastIndex = regex.lastIndex;
       }
       if (lastIndex < seg.text.length) {
@@ -263,16 +332,35 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
     segments = next;
   }
 
+  // Build plain text and collect inline styles
   let plainText = "";
   for (const seg of segments) {
     const start = plainText.length;
     plainText += seg.text;
     for (const st of seg.styles) {
-      styles.push({ start, len: seg.text.length, st } as Style);
+      allStyles.push({ start, len: seg.text.length, st } as Style);
     }
   }
 
-  return { text: plainText, styles };
+  // --- Phase 3: apply line-level styles using final offsets ---
+  // Compute the start offset and length of each original line in the final plain text.
+  const finalLines = plainText.split("\n");
+  let offset = 0;
+  for (let i = 0; i < finalLines.length; i++) {
+    const lineLen = finalLines[i].length;
+    for (const ls of lineStyles) {
+      if (ls.lineIndex === i && lineLen > 0) {
+        if (ls.style === TextStyle.Indent) {
+          allStyles.push({ start: offset, len: lineLen, st: TextStyle.Indent, indentSize: ls.indentSize } as Style);
+        } else {
+          allStyles.push({ start: offset, len: lineLen, st: ls.style } as Style);
+        }
+      }
+    }
+    offset += lineLen + 1; // +1 for \n
+  }
+
+  return { text: plainText, styles: allStyles };
 }
 
 function parseBooleanFromEnv(name: string, fallback: boolean): boolean {
@@ -3104,7 +3192,7 @@ msg
   .command("send <threadId> <message>")
   .option("-g, --group", "Send to group")
   .option("--raw", "Send raw text without parsing formatting markers")
-  .description("Send text message (supports **bold** *italic* __underline__ ~~strikethrough~~)")
+  .description("Send text message with formatting (**bold** *italic* __underline__ ~~strike~~ {red}color{/red} {big}size{/big} lists indents)")
   .action(
     wrapAction(async (threadId: string, message: string, opts: { group?: boolean; raw?: boolean }, command: Command) => {
       const { api } = await requireApi(command);
