@@ -11,12 +11,12 @@ type Segment = {
   styles: TextStyle[];
 };
 
-const TAG_STYLE_MAP: Record<string, TextStyle> = {
+const TAG_STYLE_MAP: Record<string, TextStyle | null> = {
   red: TextStyle.Red,
   orange: TextStyle.Orange,
   yellow: TextStyle.Yellow,
   green: TextStyle.Green,
-  small: TextStyle.Small,
+  small: null,
   big: TextStyle.Big,
   underline: TextStyle.Underline,
 };
@@ -41,13 +41,14 @@ const INLINE_MARKERS: { pattern: RegExp; style: TextStyle | null; extraStyles?: 
  *   **bold**  __bold__  *italic*  _italic_  ~~strikethrough~~
  *   ***bold+italic***  **_combined_**
  *   {red}text{/red}  {orange}...  {yellow}...  {green}...
- *   {small}text{/small}  {big}text{/big}  {underline}text{/underline}
+ *   {big}text{/big}  {underline}text{/underline}
+ *   {small}text{/small} is downgraded to plain text without a small-size style.
  *
  * Supported line syntax:
  *   # heading       → big + bold
  *   ## heading      → bold
- *   ### heading     → bold + small
- *   #### heading    → bold + small
+ *   ### heading     → bold
+ *   #### heading    → bold
  *   - item / * item / + item → unordered list
  *   1. item         → ordered list
  *   > text          → indent
@@ -95,8 +96,6 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
       lineStyles.push({ lineIndex, style: TextStyle.Bold });
       if (depth === 1) {
         lineStyles.push({ lineIndex, style: TextStyle.Big });
-      } else if (depth === 3 || depth === 4) {
-        lineStyles.push({ lineIndex, style: TextStyle.Small });
       }
       processedLines.push(headingMatch[2]);
       continue;

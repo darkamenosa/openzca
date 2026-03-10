@@ -196,3 +196,22 @@ test("parses multiple line styles together without styling escaped markers", () 
     ],
   });
 });
+
+test("renders level-three and level-four headings as bold without small text", () => {
+  const input = ["### Section", "#### Detail"].join("\n");
+
+  assert.deepStrictEqual(parseTextStyles(input), {
+    text: "Section\nDetail",
+    styles: [
+      { start: 0, len: 7, st: TextStyle.Bold },
+      { start: 8, len: 6, st: TextStyle.Bold },
+    ],
+  });
+});
+
+test("strips small tags without emitting small text styles", () => {
+  assert.deepStrictEqual(parseTextStyles("{small}tiny{/small}"), {
+    text: "tiny",
+    styles: [],
+  });
+});
