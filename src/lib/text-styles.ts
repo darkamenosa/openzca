@@ -83,7 +83,9 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
     }
 
     if (inCodeBlock) {
-      codeOutputLineIndices.add(processedLines.length);
+      const outputLineIndex = processedLines.length;
+      codeOutputLineIndices.add(outputLineIndex);
+      lineStyles.push({ lineIndex: outputLineIndex, style: TextStyle.Indent, indentSize: 1 });
       processedLines.push(normalizeCodeBlockLeadingWhitespace(line));
       continue;
     }

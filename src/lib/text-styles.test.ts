@@ -15,35 +15,56 @@ test("converts leading whitespace into Zalo indent styles", () => {
 test("strips fenced code markers and preserves leading indentation as non-breaking spaces", () => {
   assert.deepStrictEqual(parseTextStyles("```\n  code\n    deeper\n```"), {
     text: "\u00A0\u00A0code\n\u00A0\u00A0\u00A0\u00A0deeper",
-    styles: [],
+    styles: [
+      { start: 0, len: 6, st: TextStyle.Indent, indentSize: 1 },
+      { start: 7, len: 10, st: TextStyle.Indent, indentSize: 1 },
+    ],
   });
 });
 
 test("keeps unindented fenced code lines untouched", () => {
   assert.deepStrictEqual(parseTextStyles("```\nconst x = 1\n  return x\n```"), {
     text: "const x = 1\n\u00A0\u00A0return x",
-    styles: [],
+    styles: [
+      { start: 0, len: 11, st: TextStyle.Indent, indentSize: 1 },
+      { start: 12, len: 10, st: TextStyle.Indent, indentSize: 1 },
+    ],
   });
 });
 
 test("keeps markdown markers literal inside fenced code blocks", () => {
   assert.deepStrictEqual(parseTextStyles("```\n**bold**\n{red}x{/red}\n```"), {
     text: "**bold**\n{red}x{/red}",
-    styles: [],
+    styles: [
+      { start: 0, len: 8, st: TextStyle.Indent, indentSize: 1 },
+      { start: 9, len: 12, st: TextStyle.Indent, indentSize: 1 },
+    ],
   });
 });
 
 test("expands leading tabs inside fenced code blocks", () => {
   assert.deepStrictEqual(parseTextStyles("```\n\tcode\n```"), {
     text: "\u00A0\u00A0\u00A0\u00A0code",
-    styles: [],
+    styles: [{ start: 0, len: 8, st: TextStyle.Indent, indentSize: 1 }],
   });
 });
 
 test("strips fenced code language markers", () => {
   assert.deepStrictEqual(parseTextStyles("```javascript\n  const x = 1\n```"), {
     text: "\u00A0\u00A0const x = 1",
-    styles: [],
+    styles: [{ start: 0, len: 13, st: TextStyle.Indent, indentSize: 1 }],
+  });
+});
+
+test("anchors all fenced code lines with a shared indent", () => {
+  assert.deepStrictEqual(parseTextStyles("```\ntest\n  test\n    test\ntest\n```"), {
+    text: "test\n\u00A0\u00A0test\n\u00A0\u00A0\u00A0\u00A0test\ntest",
+    styles: [
+      { start: 0, len: 4, st: TextStyle.Indent, indentSize: 1 },
+      { start: 5, len: 6, st: TextStyle.Indent, indentSize: 1 },
+      { start: 12, len: 8, st: TextStyle.Indent, indentSize: 1 },
+      { start: 21, len: 4, st: TextStyle.Indent, indentSize: 1 },
+    ],
   });
 });
 
@@ -171,6 +192,7 @@ test("parses a mixed markdown document with headings, lists, tags, escapes, and 
       { start: 22, len: 5, st: TextStyle.OrderedList },
       { start: 28, len: 9, st: TextStyle.Indent, indentSize: 1 },
       { start: 28, len: 9, st: TextStyle.UnorderedList },
+      { start: 70, len: 13, st: TextStyle.Indent, indentSize: 1 },
     ],
   });
 });
