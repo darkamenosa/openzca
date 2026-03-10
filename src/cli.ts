@@ -212,73 +212,110 @@ function asThreadType(groupFlag?: boolean): ThreadType {
 }
 
 /**
- * Parse markdown-like formatting from message text and return plain text + styles.
+ * Parse markdown formatting from message text and return plain text + styles.
  *
  * Inline syntax (nestable):
- *   **bold**  *italic*  __underline__  ~~strikethrough~~  ***bold+italic***
+ *   **bold**  __bold__  *italic*  _italic_  ~~strikethrough~~
+ *   ***bold+italic***  **_combined_**
  *   {red}text{/red}  {orange}...  {yellow}...  {green}...
- *   {small}text{/small}  {big}text{/big}
+ *   {small}text{/small}  {big}text{/big}  {underline}text{/underline}
  *
  * Line-level syntax:
- *   # heading     → big + bold
- *   ## heading    → bold
- *   ### heading   → bold + small
- *   - item        → unordered list
- *   1. item       → ordered list
- *   >  item       → indent (each > adds one indent level)
+ *   # heading       → big + bold
+ *   ## heading      → bold
+ *   ### heading     → bold + small
+ *   ####-###### h   → bold
+ *   - item / * item / + item → unordered list
+ *   1. item         → ordered list
+ *   > text          → indent (each > adds one level)
+ *   Nested lists: leading whitespace + marker → indent + list
  *
- * Unmatched markers are left as-is.
+ * Escape: \* \_ \~ \# \\ → literal character
  */
 function parseTextStyles(input: string): { text: string; styles: Style[] } {
   const allStyles: Style[] = [];
 
-  // --- Phase 1: line-level styles (lists, indent) ---
-  // Process lines, strip markers, record line styles to apply after inline parsing.
-  const lines = input.split("\n");
+  // --- Phase 0: handle escape sequences ---
+  // Replace \<char> with a placeholder so markers don't match, restore later.
+  // Use \x01...\x02 control chars as delimiters (no markdown-significant chars).
+  const escapeMap: string[] = [];
+  const escaped = input.replace(/\\([*_~#\\{}>+\-])/g, (_match, ch: string) => {
+    const idx = escapeMap.length;
+    escapeMap.push(ch);
+    return `\x01${idx}\x02`;
+  });
+
+  // --- Phase 1: line-level styles (lists, indent, headings) ---
+  const lines = escaped.split("\n");
   const lineStyles: { lineIndex: number; style: TextStyle; indentSize?: number }[] = [];
   const processedLines: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    // Headings: # = Big+Bold, ## = Bold, ### = Bold+Small
-    const headingMatch = line.match(/^(#{1,3})\s(.*)$/);
+    let line = lines[i];
+
+    // Headings: # through ######
+    const headingMatch = line.match(/^(#{1,6})\s(.*)$/);
     if (headingMatch) {
       const level = headingMatch[1].length;
       lineStyles.push({ lineIndex: i, style: TextStyle.Bold });
       if (level === 1) lineStyles.push({ lineIndex: i, style: TextStyle.Big });
-      if (level === 3) lineStyles.push({ lineIndex: i, style: TextStyle.Small });
+      else if (level >= 3) lineStyles.push({ lineIndex: i, style: TextStyle.Small });
       processedLines.push(headingMatch[2]);
       continue;
     }
+
+    // Blockquotes: > prefix (before list detection so "> - item" works)
+    const bqMatch = line.match(/^(>+)\s?(.*)$/);
+    if (bqMatch) {
+      lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: bqMatch[1].length });
+      line = bqMatch[2];
+      // Fall through to check if remaining content is a list item
+    }
+
+    // Detect leading whitespace for nested lists → indent level
+    const indentContentMatch = line.match(/^(\s+)(.*)$/);
+    let indentLevel = 0;
+    let content = line;
+    if (indentContentMatch) {
+      indentLevel = Math.max(1, Math.floor(indentContentMatch[1].length / 2));
+      content = indentContentMatch[2];
+    }
+
     // Ordered list: "1. ", "2. ", etc.
-    const olMatch = line.match(/^(\d+)\.\s(.*)$/);
+    const olMatch = content.match(/^(\d+)\.\s(.*)$/);
     if (olMatch) {
+      if (indentLevel > 0) {
+        lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: indentLevel });
+      }
       lineStyles.push({ lineIndex: i, style: TextStyle.OrderedList });
       processedLines.push(olMatch[2]);
       continue;
     }
-    // Unordered list: "- " at line start
-    const ulMatch = line.match(/^-\s(.*)$/);
+
+    // Unordered list: "- ", "* ", "+ " at content start
+    const ulMatch = content.match(/^[-*+]\s(.*)$/);
     if (ulMatch) {
+      if (indentLevel > 0) {
+        lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: indentLevel });
+      }
       lineStyles.push({ lineIndex: i, style: TextStyle.UnorderedList });
       processedLines.push(ulMatch[1]);
       continue;
     }
-    // Indent: "> " prefix, multiple > for deeper indent
-    const indentMatch = line.match(/^(>+)\s?(.*)$/);
-    if (indentMatch) {
-      lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: indentMatch[1].length });
-      processedLines.push(indentMatch[2]);
+
+    // Plain indented line (not a list) with leading whitespace
+    if (indentLevel > 0) {
+      lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: indentLevel });
+      processedLines.push(content);
       continue;
     }
+
     processedLines.push(line);
   }
 
-  // Rejoin for inline parsing
   const inlineInput = processedLines.join("\n");
 
   // --- Phase 2: inline styles ---
-  // Order matters: longer/more-specific markers first
   const colorMap: Record<string, TextStyle> = {
     red: TextStyle.Red,
     orange: TextStyle.Orange,
@@ -286,15 +323,21 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
     green: TextStyle.Green,
     small: TextStyle.Small,
     big: TextStyle.Big,
+    underline: TextStyle.Underline,
   };
   const tagNames = Object.keys(colorMap).join("|");
   const markers: { pattern: RegExp; style: TextStyle | null; extraStyles?: TextStyle[] }[] = [
     // Tags first so inner markdown markers are preserved for subsequent passes
     { pattern: new RegExp(`\\{(${tagNames})\\}(.+?)\\{/\\1\\}`, "g"), style: null },
+    // *** = bold + italic
     { pattern: /\*\*\*(.+?)\*\*\*/g, style: TextStyle.Bold, extraStyles: [TextStyle.Italic] },
+    // ** and __ = bold (standard markdown)
     { pattern: /\*\*(.+?)\*\*/g, style: TextStyle.Bold },
+    { pattern: /__(.+?)__/g, style: TextStyle.Bold },
+    // * and _ = italic (standard markdown)
     { pattern: /\*(.+?)\*/g, style: TextStyle.Italic },
-    { pattern: /__(.+?)__/g, style: TextStyle.Underline },
+    { pattern: /_(.+?)_/g, style: TextStyle.Italic },
+    // ~~ = strikethrough
     { pattern: /~~(.+?)~~/g, style: TextStyle.StrikeThrough },
   ];
 
@@ -312,7 +355,6 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
         if (m.index > lastIndex) {
           next.push({ text: seg.text.slice(lastIndex, m.index), styles: [...seg.styles] });
         }
-        // For tag-based markers, capture group 1 is tag name, group 2 is content
         const isTagPattern = marker.style === null;
         const innerText = isTagPattern ? m[2] : m[1];
         const resolvedStyle = isTagPattern ? colorMap[m[1]] : marker.style!;
@@ -342,8 +384,34 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
     }
   }
 
-  // --- Phase 3: apply line-level styles using final offsets ---
-  // Compute the start offset and length of each original line in the final plain text.
+  // --- Phase 3: restore escape placeholders (\x01<idx>\x02 → original char) ---
+  if (escapeMap.length > 0) {
+    const escRegex = /\x01(\d+)\x02/g;
+    // Build position shift map before replacement
+    const shifts: { pos: number; delta: number }[] = [];
+    let cumDelta = 0;
+    for (const m of plainText.matchAll(escRegex)) {
+      const idx = parseInt(m[1], 10);
+      cumDelta += m[0].length - escapeMap[idx].length;
+      shifts.push({ pos: m.index! + m[0].length, delta: cumDelta });
+    }
+    // Adjust style offsets
+    for (const s of allStyles) {
+      let startDelta = 0;
+      let endDelta = 0;
+      const end = s.start + s.len;
+      for (const sh of shifts) {
+        if (sh.pos <= s.start) startDelta = sh.delta;
+        if (sh.pos <= end) endDelta = sh.delta;
+      }
+      s.start -= startDelta;
+      s.len -= (endDelta - startDelta);
+    }
+    // Replace placeholders with original characters
+    plainText = plainText.replace(escRegex, (_m, idxStr: string) => escapeMap[parseInt(idxStr, 10)]);
+  }
+
+  // --- Phase 4: apply line-level styles using final offsets ---
   const finalLines = plainText.split("\n");
   let offset = 0;
   for (let i = 0; i < finalLines.length; i++) {
@@ -357,7 +425,7 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
         }
       }
     }
-    offset += lineLen + 1; // +1 for \n
+    offset += lineLen + 1;
   }
 
   return { text: plainText, styles: allStyles };
