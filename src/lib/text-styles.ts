@@ -59,9 +59,6 @@ const INLINE_MARKERS: { pattern: RegExp; style: TextStyle | null; extraStyles?: 
 export function parseTextStyles(input: string): { text: string; styles: Style[] } {
   const allStyles: Style[] = [];
 
-  const codeLineIndices = extractCodeBlockLines(input);
-  input = stripCodeFences(input);
-
   const escapeMap: string[] = [];
   const escapedInput = input.replace(/\\([*_~#\\{}>+\-])/g, (_match, ch: string) => {
     const index = escapeMap.length;
@@ -72,12 +69,23 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
   const lines = escapedInput.split("\n");
   const lineStyles: LineStyle[] = [];
   const processedLines: string[] = [];
+  const codeBlockLineIndices = new Set<number>();
+  let inCodeBlock = false;
 
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     let line = lines[lineIndex];
+    let baseIndent = 0;
 
-    if (codeLineIndices.has(lineIndex)) {
+    if (/^```/.test(line)) {
+      codeBlockLineIndices.add(lineIndex);
       processedLines.push(line);
+      inCodeBlock = !inCodeBlock;
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeBlockLineIndices.add(lineIndex);
+      processedLines.push(normalizeCodeBlockLeadingWhitespace(line));
       continue;
     }
 
@@ -96,11 +104,7 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
 
     const quoteMatch = line.match(/^(>+)\s?(.*)$/);
     if (quoteMatch) {
-      lineStyles.push({
-        lineIndex,
-        style: TextStyle.Indent,
-        indentSize: Math.min(5, quoteMatch[1].length),
-      });
+      baseIndent = Math.min(5, quoteMatch[1].length);
       line = quoteMatch[2];
     }
 
@@ -111,10 +115,11 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
       indentLevel = clampIndent(indentMatch[1].length);
       content = indentMatch[2];
     }
+    const totalIndent = Math.min(5, baseIndent + indentLevel);
 
     if (/^[-*+]\s\[[ xX]\]\s/.test(content)) {
-      if (indentLevel > 0) {
-        lineStyles.push({ lineIndex, style: TextStyle.Indent, indentSize: indentLevel });
+      if (totalIndent > 0) {
+        lineStyles.push({ lineIndex, style: TextStyle.Indent, indentSize: totalIndent });
       }
       processedLines.push(content);
       continue;
@@ -122,8 +127,8 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
 
     const orderedListMatch = content.match(/^(\d+)\.\s(.*)$/);
     if (orderedListMatch) {
-      if (indentLevel > 0) {
-        lineStyles.push({ lineIndex, style: TextStyle.Indent, indentSize: indentLevel });
+      if (totalIndent > 0) {
+        lineStyles.push({ lineIndex, style: TextStyle.Indent, indentSize: totalIndent });
       }
       lineStyles.push({ lineIndex, style: TextStyle.OrderedList });
       processedLines.push(orderedListMatch[2]);
@@ -132,16 +137,16 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
 
     const unorderedListMatch = content.match(/^[-*+]\s(.*)$/);
     if (unorderedListMatch) {
-      if (indentLevel > 0) {
-        lineStyles.push({ lineIndex, style: TextStyle.Indent, indentSize: indentLevel });
+      if (totalIndent > 0) {
+        lineStyles.push({ lineIndex, style: TextStyle.Indent, indentSize: totalIndent });
       }
       lineStyles.push({ lineIndex, style: TextStyle.UnorderedList });
       processedLines.push(unorderedListMatch[1]);
       continue;
     }
 
-    if (indentLevel > 0) {
-      lineStyles.push({ lineIndex, style: TextStyle.Indent, indentSize: indentLevel });
+    if (totalIndent > 0) {
+      lineStyles.push({ lineIndex, style: TextStyle.Indent, indentSize: totalIndent });
       processedLines.push(content);
       continue;
     }
@@ -149,7 +154,7 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
     processedLines.push(line);
   }
 
-  for (const codeLineIndex of codeLineIndices) {
+  for (const codeLineIndex of codeBlockLineIndices) {
     if (codeLineIndex >= processedLines.length) {
       continue;
     }
@@ -300,41 +305,14 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
   return { text: plainText, styles: allStyles };
 }
 
-function extractCodeBlockLines(input: string): Set<number> {
-  const codeLineIndices = new Set<number>();
-  const rawLines = input.split("\n");
-  let lineIndex = 0;
-  let inCodeBlock = false;
-
-  for (const rawLine of rawLines) {
-    if (/^```/.test(rawLine)) {
-      inCodeBlock = !inCodeBlock;
-      continue;
-    }
-    if (inCodeBlock) {
-      codeLineIndices.add(lineIndex);
-    }
-    lineIndex += 1;
-  }
-
-  return codeLineIndices;
-}
-
-function stripCodeFences(input: string): string {
-  const keptLines: string[] = [];
-  let inCodeBlock = false;
-
-  for (const rawLine of input.split("\n")) {
-    if (/^```/.test(rawLine)) {
-      inCodeBlock = !inCodeBlock;
-      continue;
-    }
-    keptLines.push(rawLine);
-  }
-
-  return keptLines.join("\n");
-}
-
 function clampIndent(spaceCount: number): number {
   return Math.min(5, Math.max(1, Math.floor(spaceCount / 2)));
+}
+
+function normalizeCodeBlockLeadingWhitespace(line: string): string {
+  return line.replace(/^[ \t]+/, (leadingWhitespace) =>
+    leadingWhitespace
+      .replace(/\t/g, "\u00A0\u00A0\u00A0\u00A0")
+      .replace(/ /g, "\u00A0"),
+  );
 }

@@ -12,23 +12,30 @@ test("converts leading whitespace into Zalo indent styles", () => {
   });
 });
 
-test("preserves fenced code content with literal spaces", () => {
+test("preserves fenced code blocks with leading indentation as non-breaking spaces", () => {
   assert.deepStrictEqual(parseTextStyles("```\n  code\n    deeper\n```"), {
-    text: "  code\n    deeper",
+    text: "```\n\u00A0\u00A0code\n\u00A0\u00A0\u00A0\u00A0deeper\n```",
     styles: [],
   });
 });
 
 test("keeps unindented fenced code lines untouched", () => {
   assert.deepStrictEqual(parseTextStyles("```\nconst x = 1\n  return x\n```"), {
-    text: "const x = 1\n  return x",
+    text: "```\nconst x = 1\n\u00A0\u00A0return x\n```",
     styles: [],
   });
 });
 
 test("keeps markdown markers literal inside fenced code blocks", () => {
   assert.deepStrictEqual(parseTextStyles("```\n**bold**\n{red}x{/red}\n```"), {
-    text: "**bold**\n{red}x{/red}",
+    text: "```\n**bold**\n{red}x{/red}\n```",
+    styles: [],
+  });
+});
+
+test("expands leading tabs inside fenced code blocks", () => {
+  assert.deepStrictEqual(parseTextStyles("```\n\tcode\n```"), {
+    text: "```\n\u00A0\u00A0\u00A0\u00A0code\n```",
     styles: [],
   });
 });
@@ -64,6 +71,74 @@ test("supports Zalo-specific underline tags", () => {
   });
 });
 
+test("combines quote depth and extra leading spaces into one indent style", () => {
+  assert.deepStrictEqual(parseTextStyles(">   hello"), {
+    text: "hello",
+    styles: [{ start: 0, len: 5, st: TextStyle.Indent, indentSize: 2 }],
+  });
+});
+
+test("combines quote depth with nested ordered list indentation", () => {
+  assert.deepStrictEqual(parseTextStyles(">   1. child _item_"), {
+    text: "child item",
+    styles: [
+      { start: 6, len: 4, st: TextStyle.Italic },
+      { start: 0, len: 10, st: TextStyle.Indent, indentSize: 2 },
+      { start: 0, len: 10, st: TextStyle.OrderedList },
+    ],
+  });
+});
+
+test("applies indent and ordered list styles to nested ordered list items", () => {
+  const input = [
+    "1. First item",
+    "2. Second item",
+    "3. Third item",
+    "    1. Indented item",
+    "    2. Indented item",
+    "4. Fourth item",
+  ].join("\n");
+
+  assert.deepStrictEqual(parseTextStyles(input), {
+    text: "First item\nSecond item\nThird item\nIndented item\nIndented item\nFourth item",
+    styles: [
+      { start: 0, len: 10, st: TextStyle.OrderedList },
+      { start: 11, len: 11, st: TextStyle.OrderedList },
+      { start: 23, len: 10, st: TextStyle.OrderedList },
+      { start: 34, len: 13, st: TextStyle.Indent, indentSize: 2 },
+      { start: 34, len: 13, st: TextStyle.OrderedList },
+      { start: 48, len: 13, st: TextStyle.Indent, indentSize: 2 },
+      { start: 48, len: 13, st: TextStyle.OrderedList },
+      { start: 62, len: 11, st: TextStyle.OrderedList },
+    ],
+  });
+});
+
+test("applies indent and unordered list styles to nested unordered list items", () => {
+  const input = [
+    "- First item",
+    "- Second item",
+    "- Third item",
+    "    - Indented item",
+    "    - Indented item",
+    "- Fourth item",
+  ].join("\n");
+
+  assert.deepStrictEqual(parseTextStyles(input), {
+    text: "First item\nSecond item\nThird item\nIndented item\nIndented item\nFourth item",
+    styles: [
+      { start: 0, len: 10, st: TextStyle.UnorderedList },
+      { start: 11, len: 11, st: TextStyle.UnorderedList },
+      { start: 23, len: 10, st: TextStyle.UnorderedList },
+      { start: 34, len: 13, st: TextStyle.Indent, indentSize: 2 },
+      { start: 34, len: 13, st: TextStyle.UnorderedList },
+      { start: 48, len: 13, st: TextStyle.Indent, indentSize: 2 },
+      { start: 48, len: 13, st: TextStyle.UnorderedList },
+      { start: 62, len: 11, st: TextStyle.UnorderedList },
+    ],
+  });
+});
+
 test("parses a mixed markdown document with headings, lists, tags, escapes, and fenced code", () => {
   const input = [
     "# Title",
@@ -78,7 +153,7 @@ test("parses a mixed markdown document with headings, lists, tags, escapes, and 
   ].join("\n");
 
   assert.deepStrictEqual(parseTextStyles(input), {
-    text: "Title\nquote with bold\nfirst\nchild hot\n- [x] done\nplain *star* and tag\n  const x = 1",
+    text: "Title\nquote with bold\nfirst\nchild hot\n- [x] done\nplain *star* and tag\n```\n\u00A0\u00A0const x = 1\n```",
     styles: [
       { start: 17, len: 4, st: TextStyle.Bold },
       { start: 34, len: 3, st: TextStyle.Red },
