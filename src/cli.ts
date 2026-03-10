@@ -22,6 +22,7 @@ import {
   type Credentials,
   type Style,
 } from "zca-js";
+import { marked, type Token, type Tokens } from "marked";
 import {
   APP_HOME,
   PROFILES_FILE,
@@ -236,141 +237,9 @@ function asThreadType(groupFlag?: boolean): ThreadType {
  * Escape: \* \_ \~ \# \\ → literal character
  */
 function parseTextStyles(input: string): { text: string; styles: Style[] } {
-  const allStyles: Style[] = [];
-
-  // --- Phase 0: strip code fences and protect code content ---
-  // Process line-by-line: strip ``` fence lines, track which output lines are code.
-  const codeLineIndices: Set<number> = new Set();
-  {
-    const rawLines = input.split("\n");
-    const kept: string[] = [];
-    let inCode = false;
-    for (const rawLine of rawLines) {
-      if (/^```/.test(rawLine)) {
-        inCode = !inCode;
-        continue; // drop fence line
-      }
-      if (inCode) {
-        codeLineIndices.add(kept.length);
-      }
-      kept.push(rawLine);
-    }
-    input = kept.join("\n");
-  }
-
-  // Handle escape sequences: \<char> → placeholder \x01<idx>\x02
-  const escapeMap: string[] = [];
-  const escaped = input.replace(/\\([*_~#\\{}>+\-])/g, (_match, ch: string) => {
-    const idx = escapeMap.length;
-    escapeMap.push(ch);
-    return `\x01${idx}\x02`;
-  });
-
-  // --- Phase 1: line-level styles (lists, indent, headings) ---
-  const lines = escaped.split("\n");
-  const lineStyles: { lineIndex: number; style: TextStyle; indentSize?: number }[] = [];
-  const processedLines: string[] = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    let line = lines[i];
-
-    // Code block lines — convert leading whitespace to Indent (Zalo strips spaces)
-    if (codeLineIndices.has(i)) {
-      const codeIndentMatch = line.match(/^(\s+)(.*)$/);
-      if (codeIndentMatch) {
-        const codeIndent = Math.min(5, Math.max(1, Math.floor(codeIndentMatch[1].length / 2)));
-        lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: codeIndent });
-        processedLines.push(codeIndentMatch[2]);
-      } else {
-        processedLines.push(line);
-      }
-      continue;
-    }
-
-    // Headings: # through #### only (H1-H4)
-    const headingMatch = line.match(/^(#{1,4})\s(.*)$/);
-    if (headingMatch) {
-      const level = headingMatch[1].length;
-      lineStyles.push({ lineIndex: i, style: TextStyle.Bold });
-      if (level === 1) lineStyles.push({ lineIndex: i, style: TextStyle.Big });
-      else if (level === 3 || level === 4) lineStyles.push({ lineIndex: i, style: TextStyle.Small });
-      processedLines.push(headingMatch[2]);
-      continue;
-    }
-
-    // Blockquotes: > prefix (before list detection so "> - item" works)
-    const bqMatch = line.match(/^(>+)\s?(.*)$/);
-    if (bqMatch) {
-      lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: Math.min(5, bqMatch[1].length) });
-      line = bqMatch[2];
-      // Fall through to check if remaining content is a list item
-    }
-
-    // Detect leading whitespace → Indent style (Zalo strips actual spaces)
-    const indentContentMatch = line.match(/^(\s+)(.*)$/);
-    let indentLevel = 0;
-    let content = line;
-    if (indentContentMatch) {
-      indentLevel = Math.min(5, Math.max(1, Math.floor(indentContentMatch[1].length / 2)));
-      content = indentContentMatch[2];
-    }
-
-    // Checkbox lines: - [x] or - [ ] — keep as-is, do not parse as list
-    if (/^[-*+]\s\[[ xX]\]\s/.test(content)) {
-      if (indentLevel > 0) {
-        lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: indentLevel });
-      }
-      processedLines.push(content);
-      continue;
-    }
-
-    // Ordered list: "1. ", "2. ", etc.
-    const olMatch = content.match(/^(\d+)\.\s(.*)$/);
-    if (olMatch) {
-      if (indentLevel > 0) {
-        lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: indentLevel });
-      }
-      lineStyles.push({ lineIndex: i, style: TextStyle.OrderedList });
-      processedLines.push(olMatch[2]);
-      continue;
-    }
-
-    // Unordered list: "- ", "* ", "+ " at content start
-    const ulMatch = content.match(/^[-*+]\s(.*)$/);
-    if (ulMatch) {
-      if (indentLevel > 0) {
-        lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: indentLevel });
-      }
-      lineStyles.push({ lineIndex: i, style: TextStyle.UnorderedList });
-      processedLines.push(ulMatch[1]);
-      continue;
-    }
-
-    // Plain text with leading whitespace → Indent (Zalo strips actual spaces)
-    if (indentLevel > 0) {
-      lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: indentLevel });
-      processedLines.push(content);
-      continue;
-    }
-
-    processedLines.push(line);
-  }
-
-  // Protect code block lines from inline parsing by escaping markdown chars
-  for (const ci of codeLineIndices) {
-    if (ci < processedLines.length) {
-      processedLines[ci] = processedLines[ci].replace(/[*_~{}]/g, (ch) => {
-        const idx = escapeMap.length;
-        escapeMap.push(ch);
-        return `\x01${idx}\x02`;
-      });
-    }
-  }
-
-  const inlineInput = processedLines.join("\n");
-
-  // --- Phase 2: inline styles ---
-  const colorMap: Record<string, TextStyle> = {
+  // --- Phase 0: extract {tag}...{/tag} extensions before marked parsing ---
+  // Mask them so marked doesn't interfere, then restore + apply styles after.
+  const tagColorMap: Record<string, TextStyle> = {
     red: TextStyle.Red,
     orange: TextStyle.Orange,
     yellow: TextStyle.Yellow,
@@ -379,140 +248,315 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
     big: TextStyle.Big,
     underline: TextStyle.Underline,
   };
-  const tagNames = Object.keys(colorMap).join("|");
-  const markers: { pattern: RegExp; style: TextStyle | null; extraStyles?: TextStyle[] }[] = [
-    // Tags first so inner markdown markers are preserved for subsequent passes
-    { pattern: new RegExp(`\\{(${tagNames})\\}(.+?)\\{/\\1\\}`, "g"), style: null },
-    // *** = bold + italic
-    { pattern: /\*\*\*(.+?)\*\*\*/g, style: TextStyle.Bold, extraStyles: [TextStyle.Italic] },
-    // ** and __ = bold (standard markdown; __ requires word boundaries)
-    { pattern: /\*\*(.+?)\*\*/g, style: TextStyle.Bold },
-    { pattern: /(?<!\w)__(.+?)__(?!\w)/g, style: TextStyle.Bold },
-    // * and _ = italic (_ requires word boundaries to avoid snake_case)
-    { pattern: /\*(.+?)\*/g, style: TextStyle.Italic },
-    { pattern: /(?<!\w)_(.+?)_(?!\w)/g, style: TextStyle.Italic },
-    // ~~ = strikethrough
-    { pattern: /~~(.+?)~~/g, style: TextStyle.StrikeThrough },
-  ];
+  const tagNames = Object.keys(tagColorMap).join("|");
+  const tagRegex = new RegExp(`\\{(${tagNames})\\}([\\s\\S]+?)\\{/\\1\\}`, "g");
+  const tagSlots: { placeholder: string; tagName: string; innerMd: string }[] = [];
+  const maskedInput = input.replace(tagRegex, (_m, tagName: string, inner: string) => {
+    const idx = tagSlots.length;
+    const placeholder = `\x01TAG${idx}\x02`;
+    tagSlots.push({ placeholder, tagName, innerMd: inner });
+    return placeholder;
+  });
 
-  interface Segment { text: string; styles: TextStyle[] }
+  // --- Phase 1: tokenize with marked ---
+  const tokens = marked.lexer(maskedInput);
 
-  let segments: Segment[] = [{ text: inlineInput, styles: [] }];
+  // --- Phase 2: walk token tree → plain text + styles ---
+  const styles: Style[] = [];
+  let text = "";
 
-  for (const marker of markers) {
-    const next: Segment[] = [];
-    for (const seg of segments) {
-      let lastIndex = 0;
-      const regex = new RegExp(marker.pattern.source, marker.pattern.flags);
-      let m: RegExpExecArray | null;
-      while ((m = regex.exec(seg.text)) !== null) {
-        if (m.index > lastIndex) {
-          next.push({ text: seg.text.slice(lastIndex, m.index), styles: [...seg.styles] });
-        }
-        const isTagPattern = marker.style === null;
-        const innerText = isTagPattern ? m[2] : m[1];
-        const resolvedStyle = isTagPattern ? colorMap[m[1]] : marker.style!;
-        const combined = [...seg.styles, resolvedStyle];
-        if (marker.extraStyles) {
-          combined.push(...marker.extraStyles);
-        }
-        next.push({ text: innerText, styles: combined });
-        lastIndex = regex.lastIndex;
-      }
-      if (lastIndex < seg.text.length) {
-        next.push({ text: seg.text.slice(lastIndex), styles: [...seg.styles] });
-      } else if (lastIndex === 0) {
-        next.push(seg);
-      }
-    }
-    segments = next;
-  }
+  type LineStyle = { style: TextStyle; indentSize?: number };
 
-  // Build plain text and collect inline styles
-  let plainText = "";
-  for (const seg of segments) {
-    const start = plainText.length;
-    plainText += seg.text;
-    for (const st of seg.styles) {
-      allStyles.push({ start, len: seg.text.length, st } as Style);
-    }
-  }
-
-  // --- Phase 2b: fix orphaned *..* pairs from cross-segment nesting ---
-  // e.g. *italic **bold** italic* → after ** processing, outer * are orphaned.
-  // Scan plainText for remaining *..* or _.._ pairs and apply italic.
-  const orphanRegex = /\*([^*\n]+?)\*/g;
-  const orphanMatches = [...plainText.matchAll(orphanRegex)];
-  // Process from right to left so earlier offsets aren't affected
-  for (let oi = orphanMatches.length - 1; oi >= 0; oi--) {
-    const om = orphanMatches[oi];
-    const openPos = om.index!;
-    const content = om[1];
-    const closePos = openPos + content.length + 1;
-
-    // Add italic style for the inner content (starts after the opening *)
-    allStyles.push({ start: openPos + 1, len: content.length, st: TextStyle.Italic } as Style);
-
-    // Remove the two * delimiters from plainText
-    plainText = plainText.slice(0, closePos) + plainText.slice(closePos + 1);
-    plainText = plainText.slice(0, openPos) + plainText.slice(openPos + 1);
-
-    // Adjust all existing style offsets for the two removed characters
-    for (const s of allStyles) {
-      // Adjust for close removal (at closePos, but after open removal it shifts)
-      if (s.start > closePos) s.start--;
-      else if (s.start + s.len > closePos) s.len--;
-      // Adjust for open removal (at openPos)
-      if (s.start > openPos) s.start--;
-      else if (s.start + s.len > openPos) s.len--;
-    }
-  }
-
-  // --- Phase 3: restore escape placeholders (\x01<idx>\x02 → original char) ---
-  if (escapeMap.length > 0) {
-    const escRegex = /\x01(\d+)\x02/g;
-    // Build position shift map before replacement
-    const shifts: { pos: number; delta: number }[] = [];
-    let cumDelta = 0;
-    for (const m of plainText.matchAll(escRegex)) {
-      const idx = parseInt(m[1], 10);
-      cumDelta += m[0].length - escapeMap[idx].length;
-      shifts.push({ pos: m.index! + m[0].length, delta: cumDelta });
-    }
-    // Adjust style offsets
-    for (const s of allStyles) {
-      let startDelta = 0;
-      let endDelta = 0;
-      const end = s.start + s.len;
-      for (const sh of shifts) {
-        if (sh.pos <= s.start) startDelta = sh.delta;
-        if (sh.pos <= end) endDelta = sh.delta;
-      }
-      s.start -= startDelta;
-      s.len -= (endDelta - startDelta);
-    }
-    // Replace placeholders with original characters
-    plainText = plainText.replace(escRegex, (_m, idxStr: string) => escapeMap[parseInt(idxStr, 10)]);
-  }
-
-  // --- Phase 4: apply line-level styles using final offsets ---
-  const finalLines = plainText.split("\n");
-  let offset = 0;
-  for (let i = 0; i < finalLines.length; i++) {
-    const lineLen = finalLines[i].length;
+  function emitLineStyles(lineStart: number, lineLen: number, lineStyles: LineStyle[]) {
+    if (lineLen <= 0) return;
     for (const ls of lineStyles) {
-      if (ls.lineIndex === i && lineLen > 0) {
-        if (ls.style === TextStyle.Indent) {
-          allStyles.push({ start: offset, len: lineLen, st: TextStyle.Indent, indentSize: ls.indentSize } as Style);
-        } else {
-          allStyles.push({ start: offset, len: lineLen, st: ls.style } as Style);
+      if (ls.style === TextStyle.Indent) {
+        styles.push({ start: lineStart, len: lineLen, st: ls.style, indentSize: ls.indentSize } as Style);
+      } else {
+        styles.push({ start: lineStart, len: lineLen, st: ls.style } as Style);
+      }
+    }
+  }
+
+  function walkInline(tokens: Token[], inheritedStyles: TextStyle[]) {
+    for (const tok of tokens) {
+      switch (tok.type) {
+        case "text": {
+          const t = tok as Tokens.Text;
+          // Text tokens may contain sub-tokens (from inline lexing)
+          if (t.tokens && t.tokens.length > 0) {
+            walkInline(t.tokens, inheritedStyles);
+          } else {
+            const start = text.length;
+            text += t.text;
+            const len = t.text.length;
+            if (len > 0) {
+              for (const st of inheritedStyles) {
+                styles.push({ start, len, st } as Style);
+              }
+            }
+          }
+          break;
+        }
+        case "strong": {
+          const t = tok as Tokens.Strong;
+          walkInline(t.tokens, [...inheritedStyles, TextStyle.Bold]);
+          break;
+        }
+        case "em": {
+          const t = tok as Tokens.Em;
+          walkInline(t.tokens, [...inheritedStyles, TextStyle.Italic]);
+          break;
+        }
+        case "del": {
+          const t = tok as Tokens.Del;
+          walkInline(t.tokens, [...inheritedStyles, TextStyle.StrikeThrough]);
+          break;
+        }
+        case "codespan": {
+          const t = tok as Tokens.Codespan;
+          const start = text.length;
+          text += t.text;
+          const len = t.text.length;
+          if (len > 0) {
+            for (const st of inheritedStyles) {
+              styles.push({ start, len, st } as Style);
+            }
+          }
+          break;
+        }
+        case "escape": {
+          const t = tok as Tokens.Escape;
+          const start = text.length;
+          text += t.text;
+          if (t.text.length > 0) {
+            for (const st of inheritedStyles) {
+              styles.push({ start, len: t.text.length, st } as Style);
+            }
+          }
+          break;
+        }
+        case "link": {
+          // Render link text, discard URL (Zalo has no hyperlink style)
+          const t = tok as Tokens.Link;
+          walkInline(t.tokens, inheritedStyles);
+          break;
+        }
+        case "image": {
+          // Render alt text
+          const t = tok as Tokens.Image;
+          const start = text.length;
+          text += t.text;
+          if (t.text.length > 0) {
+            for (const st of inheritedStyles) {
+              styles.push({ start, len: t.text.length, st } as Style);
+            }
+          }
+          break;
+        }
+        case "br": {
+          text += "\n";
+          break;
+        }
+        case "checkbox": {
+          const t = tok as Tokens.Checkbox;
+          text += t.checked ? "[x] " : "[ ] ";
+          break;
+        }
+        default: {
+          // Fallback: use raw text if available
+          const t = tok as Token & { text?: string; raw?: string; tokens?: Token[] };
+          if (t.tokens && t.tokens.length > 0) {
+            walkInline(t.tokens, inheritedStyles);
+          } else if (t.text != null) {
+            const start = text.length;
+            text += t.text;
+            if (t.text.length > 0) {
+              for (const st of inheritedStyles) {
+                styles.push({ start, len: t.text.length, st } as Style);
+              }
+            }
+          }
+          break;
         }
       }
     }
-    offset += lineLen + 1;
   }
 
-  return { text: plainText, styles: allStyles };
+  function walkBlock(tokens: Token[], blockLineStyles: LineStyle[], depth: number) {
+    for (let ti = 0; ti < tokens.length; ti++) {
+      const tok = tokens[ti];
+
+      switch (tok.type) {
+        case "heading": {
+          const t = tok as Tokens.Heading;
+          const headingStyles: LineStyle[] = [{ style: TextStyle.Bold }];
+          if (t.depth === 1) headingStyles.push({ style: TextStyle.Big });
+          else if (t.depth === 3 || t.depth === 4) headingStyles.push({ style: TextStyle.Small });
+          // H5/H6: just bold
+          if (t.depth <= 4) {
+            const lineStart = text.length;
+            walkInline(t.tokens, []);
+            const lineLen = text.length - lineStart;
+            emitLineStyles(lineStart, lineLen, [...blockLineStyles, ...headingStyles]);
+            text += "\n";
+          } else {
+            // H5+ pass through as text with # prefix
+            const lineStart = text.length;
+            text += "#".repeat(t.depth) + " ";
+            walkInline(t.tokens, []);
+            const lineLen = text.length - lineStart;
+            emitLineStyles(lineStart, lineLen, blockLineStyles);
+            text += "\n";
+          }
+          break;
+        }
+        case "paragraph": {
+          const t = tok as Tokens.Paragraph;
+          const lineStart = text.length;
+          walkInline(t.tokens, []);
+          const lineLen = text.length - lineStart;
+          emitLineStyles(lineStart, lineLen, blockLineStyles);
+          text += "\n";
+          break;
+        }
+        case "code": {
+          const t = tok as Tokens.Code;
+          // Code block: preserve spaces as-is (no Indent conversion)
+          text += t.text;
+          text += "\n";
+          break;
+        }
+        case "blockquote": {
+          const t = tok as Tokens.Blockquote;
+          const bqDepth = depth + 1;
+          walkBlock(t.tokens, [...blockLineStyles, { style: TextStyle.Indent, indentSize: Math.min(5, bqDepth) }], bqDepth);
+          break;
+        }
+        case "list": {
+          const t = tok as Tokens.List;
+          const listStyle = t.ordered ? TextStyle.OrderedList : TextStyle.UnorderedList;
+          for (const item of t.items) {
+            if (item.task) {
+              // Checkbox item: render as plain text with checkbox prefix
+              const lineStart = text.length;
+              text += item.checked ? "[x] " : "[ ] ";
+              // Walk the item's tokens (skip the checkbox token itself)
+              const nonCheckboxTokens = item.tokens.filter((t: Token) => t.type !== "checkbox");
+              walkInline(nonCheckboxTokens, []);
+              const lineLen = text.length - lineStart;
+              emitLineStyles(lineStart, lineLen, blockLineStyles);
+              text += "\n";
+            } else {
+              // Regular list item — may contain sub-lists
+              const hasSubList = item.tokens.some((t: Token) => t.type === "list");
+              if (hasSubList) {
+                // First render inline content, then recurse into sub-lists
+                const inlineTokens = item.tokens.filter((t: Token) => t.type !== "list");
+                const subLists = item.tokens.filter((t: Token) => t.type === "list");
+
+                if (inlineTokens.length > 0) {
+                  const lineStart = text.length;
+                  walkInline(inlineTokens, []);
+                  const lineLen = text.length - lineStart;
+                  emitLineStyles(lineStart, lineLen, [...blockLineStyles, { style: listStyle }]);
+                  text += "\n";
+                }
+
+                // Sub-lists get indent
+                const subIndent = Math.min(5, depth + 1);
+                walkBlock(subLists, [...blockLineStyles, { style: TextStyle.Indent, indentSize: subIndent }], depth + 1);
+              } else {
+                const lineStart = text.length;
+                walkInline(item.tokens, []);
+                const lineLen = text.length - lineStart;
+                emitLineStyles(lineStart, lineLen, [...blockLineStyles, { style: listStyle }]);
+                text += "\n";
+              }
+            }
+          }
+          break;
+        }
+        case "hr": {
+          text += "---\n";
+          break;
+        }
+        case "html": {
+          const t = tok as Tokens.HTML;
+          text += t.text;
+          break;
+        }
+        case "text": {
+          // Top-level text tokens (can happen with GFM breaks)
+          const t = tok as Tokens.Text;
+          const lineStart = text.length;
+          if (t.tokens && t.tokens.length > 0) {
+            walkInline(t.tokens, []);
+          } else {
+            text += t.text;
+          }
+          const lineLen = text.length - lineStart;
+          emitLineStyles(lineStart, lineLen, blockLineStyles);
+          text += "\n";
+          break;
+        }
+        case "space": {
+          // Blank lines
+          break;
+        }
+        default: {
+          // Fallback: use raw text
+          const t = tok as Token & { raw?: string; tokens?: Token[] };
+          if (t.raw) text += t.raw;
+          break;
+        }
+      }
+    }
+  }
+
+  walkBlock(tokens, [], 0);
+
+  // Remove trailing newline added by block processing
+  if (text.endsWith("\n")) {
+    text = text.slice(0, -1);
+  }
+
+  // --- Phase 3: restore {tag} placeholders and apply styles ---
+  for (const slot of tagSlots) {
+    const phIdx = text.indexOf(slot.placeholder);
+    if (phIdx === -1) continue;
+
+    // Parse the inner markdown recursively
+    const inner = parseTextStyles(slot.innerMd);
+    const replacement = inner.text;
+    const phLen = slot.placeholder.length;
+
+    // Replace placeholder with parsed inner text
+    text = text.slice(0, phIdx) + replacement + text.slice(phIdx + phLen);
+
+    // Adjust existing styles for the length change
+    const delta = replacement.length - phLen;
+    for (const s of styles) {
+      if (s.start >= phIdx + phLen) {
+        s.start += delta;
+      } else if (s.start + s.len > phIdx) {
+        s.len += delta;
+      }
+    }
+
+    // Add the tag style for the entire inner text
+    const tagStyle = tagColorMap[slot.tagName];
+    if (tagStyle) {
+      styles.push({ start: phIdx, len: replacement.length, st: tagStyle } as Style);
+    }
+
+    // Add inner styles with offset
+    for (const is of inner.styles) {
+      styles.push({ start: phIdx + is.start, len: is.len, st: is.st, ...(("indentSize" in is) ? { indentSize: (is as Style & { indentSize?: number }).indentSize } : {}) } as Style);
+    }
+  }
+
+  return { text, styles };
 }
 
 function parseBooleanFromEnv(name: string, fallback: boolean): boolean {
