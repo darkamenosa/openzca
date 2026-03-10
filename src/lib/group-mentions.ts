@@ -100,7 +100,7 @@ function buildCandidates(members: GroupMentionMember[]): MentionCandidate[] {
     const userId = member.userId.trim();
     if (!userId) continue;
 
-    for (const rawLabel of [member.displayName, member.zaloName]) {
+    for (const rawLabel of [member.userId, member.displayName, member.zaloName]) {
       const label = rawLabel?.trim();
       if (!label) continue;
 

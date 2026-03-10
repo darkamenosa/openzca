@@ -43,6 +43,23 @@ test("builds a raw group payload with mentions and calls the member lookup", asy
   });
 });
 
+test("builds a raw group payload resolving a member id mention", async () => {
+  const buildTextSendPayload = await loadBuilder();
+
+  const payload = await buildTextSendPayload({
+    message: "hi @123456789",
+    raw: true,
+    threadType: ThreadType.Group,
+    threadId: "group-1",
+    listGroupMembers: async () => [{ userId: "123456789", displayName: "Alice" }],
+  });
+
+  assert.deepStrictEqual(payload, {
+    msg: "hi @123456789",
+    mentions: [{ pos: 3, len: 10, uid: "123456789" }],
+  });
+});
+
 test("builds a formatted group payload with styles and mention offsets from final text", async () => {
   const buildTextSendPayload = await loadBuilder();
 

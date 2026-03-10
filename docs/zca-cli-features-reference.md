@@ -74,7 +74,7 @@ Command groups:
 - `openzca msg undo <msgId> <cliMsgId> <threadId> [--group]`
 - `openzca msg upload [file] <threadId> [--group] [-u|--url <url> ...]`
 
-Group text sends resolve unique `@Name` mentions against the current group roster using member display names and usernames. Formatting is parsed before mention offsets are calculated, so styled mentions such as `**@Alice Nguyen**` still resolve correctly. If more than one member matches the same label, the send fails instead of picking one arbitrarily.
+Group text sends resolve unique `@Name` or `@userId` mentions against the current group roster using member ids, display names, and usernames. Formatting is parsed before mention offsets are calculated, so styled mentions such as `**@Alice Nguyen**` still resolve correctly. If more than one member matches the same label, the send fails instead of picking one arbitrarily.
 
 ## Group Commands
 - `openzca group list [--json]`
@@ -162,6 +162,7 @@ openzca me info
 openzca msg send USER_ID "Hello"
 openzca msg send GROUP_ID "Hello team" --group
 openzca msg send GROUP_ID "Hi @Alice Nguyen" --group
+openzca msg send GROUP_ID "Hi @123456789" --group
 
 # 4) Optional listener
 openzca listen --echo --keep-alive

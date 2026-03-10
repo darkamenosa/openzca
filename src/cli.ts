@@ -3115,7 +3115,7 @@ msg
   .command("send <threadId> <message>")
   .option("-g, --group", "Send to group")
   .option("--raw", "Send raw text without parsing formatting markers")
-  .description("Send text message with formatting (**bold** *italic* __bold__ ~~strike~~ {underline}text{/underline} {red}color{/red} {big}size{/big} lists indents). Group sends also resolve unique @Name mentions.")
+  .description("Send text message with formatting (**bold** *italic* __bold__ ~~strike~~ {underline}text{/underline} {red}color{/red} {big}size{/big} lists indents). Group sends also resolve unique @Name/@userId mentions.")
   .action(
     wrapAction(async (threadId: string, message: string, opts: { group?: boolean; raw?: boolean }, command: Command) => {
       const { api } = await requireApi(command);

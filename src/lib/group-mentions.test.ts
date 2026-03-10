@@ -67,6 +67,14 @@ test("can resolve a mention from zaloName when displayName is absent", async () 
   ]);
 });
 
+test("can resolve a mention from the member id", async () => {
+  const { resolveOutboundGroupMentions } = await loadModule();
+
+  assert.deepStrictEqual(resolveOutboundGroupMentions("ping @123456789", [{ userId: "123456789", displayName: "Alice" }]), [
+    { pos: 5, len: 10, uid: "123456789" },
+  ]);
+});
+
 test("throws when a mention label matches multiple group members", async () => {
   const { resolveOutboundGroupMentions } = await loadModule();
 
