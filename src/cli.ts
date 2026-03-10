@@ -16,9 +16,11 @@ import {
   Gender,
   Reactions,
   ReviewPendingMemberRequestStatus,
+  TextStyle,
   ThreadType,
   type API,
   type Credentials,
+  type Style,
 } from "zca-js";
 import {
   APP_HOME,
@@ -207,6 +209,70 @@ function output(value: unknown, asJson = false): void {
 
 function asThreadType(groupFlag?: boolean): ThreadType {
   return groupFlag ? ThreadType.Group : ThreadType.User;
+}
+
+/**
+ * Parse markdown-like formatting from message text and return plain text + styles.
+ *
+ * Supported syntax:
+ *   **bold**  *italic*  __underline__  ~~strikethrough~~
+ *   ***bold+italic***
+ *
+ * Unmatched markers are left as-is.
+ */
+function parseTextStyles(input: string): { text: string; styles: Style[] } {
+  const styles: Style[] = [];
+
+  // Order matters: longer markers first so ** is tried before *
+  const markers: { pattern: RegExp; style: TextStyle }[] = [
+    { pattern: /\*\*\*(.+?)\*\*\*/g, style: TextStyle.Bold },
+    { pattern: /\*\*(.+?)\*\*/g, style: TextStyle.Bold },
+    { pattern: /\*(.+?)\*/g, style: TextStyle.Italic },
+    { pattern: /__(.+?)__/g, style: TextStyle.Underline },
+    { pattern: /~~(.+?)~~/g, style: TextStyle.StrikeThrough },
+  ];
+
+  interface Segment { text: string; styles: TextStyle[] }
+
+  let segments: Segment[] = [{ text: input, styles: [] }];
+
+  for (const { pattern, style } of markers) {
+    const next: Segment[] = [];
+    for (const seg of segments) {
+      let lastIndex = 0;
+      const regex = new RegExp(pattern.source, pattern.flags);
+      let m: RegExpExecArray | null;
+      while ((m = regex.exec(seg.text)) !== null) {
+        if (m.index > lastIndex) {
+          next.push({ text: seg.text.slice(lastIndex, m.index), styles: [...seg.styles] });
+        }
+        const combined = [...seg.styles, style];
+        // *** produces both bold and italic
+        if (pattern.source.startsWith("\\*\\*\\*")) {
+          combined.push(TextStyle.Italic);
+        }
+        next.push({ text: m[1], styles: combined });
+        lastIndex = regex.lastIndex;
+      }
+      if (lastIndex < seg.text.length) {
+        next.push({ text: seg.text.slice(lastIndex), styles: [...seg.styles] });
+      } else if (lastIndex === 0) {
+        next.push(seg);
+      }
+    }
+    segments = next;
+  }
+
+  let plainText = "";
+  for (const seg of segments) {
+    const start = plainText.length;
+    plainText += seg.text;
+    for (const st of seg.styles) {
+      styles.push({ start, len: seg.text.length, st } as Style);
+    }
+  }
+
+  return { text: plainText, styles };
 }
 
 function parseBooleanFromEnv(name: string, fallback: boolean): boolean {
@@ -3037,12 +3103,23 @@ const msg = program.command("msg").description("Messaging commands");
 msg
   .command("send <threadId> <message>")
   .option("-g, --group", "Send to group")
-  .description("Send text message")
+  .option("--raw", "Send raw text without parsing formatting markers")
+  .description("Send text message (supports **bold** *italic* __underline__ ~~strikethrough~~)")
   .action(
-    wrapAction(async (threadId: string, message: string, opts: { group?: boolean }, command: Command) => {
+    wrapAction(async (threadId: string, message: string, opts: { group?: boolean; raw?: boolean }, command: Command) => {
       const { api } = await requireApi(command);
-      const response = await api.sendMessage(message, threadId, asThreadType(opts.group));
-      output(response, false);
+      if (opts.raw) {
+        const response = await api.sendMessage(message, threadId, asThreadType(opts.group));
+        output(response, false);
+      } else {
+        const { text, styles } = parseTextStyles(message);
+        const response = await api.sendMessage(
+          { msg: text, styles: styles.length > 0 ? styles : undefined },
+          threadId,
+          asThreadType(opts.group),
+        );
+        output(response, false);
+      }
     }),
   );
 
