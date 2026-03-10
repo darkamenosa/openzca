@@ -53,7 +53,10 @@ import {
   normalizeMediaInput,
   normalizeInputList,
 } from "./lib/media.js";
-import { parseTextStyles } from "./lib/text-styles.js";
+import {
+  type GroupMentionMember,
+} from "./lib/group-mentions.js";
+import { buildTextSendPayload } from "./lib/text-send.js";
 
 const program = new Command();
 
@@ -990,6 +993,79 @@ async function buildGroupsDetailed(api: API): Promise<any[]> {
   return ids
     .map((id) => info.gridInfoMap?.[id])
     .filter((item): item is NonNullable<typeof item> => Boolean(item));
+}
+
+function normalizeGroupMemberId(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(Math.trunc(value));
+  }
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  return trimmed.replace(/_\d+$/, "");
+}
+
+async function listGroupMemberRows(api: API, groupId: string): Promise<GroupMentionMember[]> {
+  const info = await api.getGroupInfo(groupId);
+  const groupInfo = info.gridInfoMap[groupId];
+  if (!groupInfo) {
+    throw new Error(`Group not found: ${groupId}`);
+  }
+
+  const idsFromMemberIds = Array.isArray(groupInfo.memberIds)
+    ? groupInfo.memberIds.map((id) => normalizeGroupMemberId(id)).filter(Boolean)
+    : [];
+  const memVerList = (groupInfo as { memVerList?: unknown }).memVerList;
+  const idsFromMemVerList = Array.isArray(memVerList)
+    ? memVerList.map((id) => normalizeGroupMemberId(id)).filter(Boolean)
+    : [];
+
+  const currentMems = Array.isArray(groupInfo.currentMems) ? groupInfo.currentMems : [];
+  const currentMemberMap = new Map<string, { displayName: string; zaloName: string }>();
+  for (const member of currentMems) {
+    const userId = normalizeGroupMemberId(member.id);
+    if (!userId) continue;
+    currentMemberMap.set(userId, {
+      displayName: member.dName?.trim() || member.zaloName?.trim() || "",
+      zaloName: member.zaloName?.trim() || "",
+    });
+  }
+
+  const ids = Array.from(
+    new Set<string>([
+      ...idsFromMemberIds,
+      ...idsFromMemVerList,
+      ...Array.from(currentMemberMap.keys()),
+    ]),
+  );
+
+  const profiles = ids.length > 0 ? await api.getGroupMembersInfo(ids) : { profiles: {} };
+  const rawProfileMap = profiles.profiles as Record<
+    string,
+    { id?: string; displayName?: string; zaloName?: string } | undefined
+  >;
+  const profileMap = new Map<string, { displayName?: string; zaloName?: string }>();
+  for (const [key, profile] of Object.entries(rawProfileMap)) {
+    if (!profile) continue;
+    const normalizedKey = normalizeGroupMemberId(key);
+    if (normalizedKey && !profileMap.has(normalizedKey)) {
+      profileMap.set(normalizedKey, profile);
+    }
+    const profileId = normalizeGroupMemberId(profile.id);
+    if (profileId && !profileMap.has(profileId)) {
+      profileMap.set(profileId, profile);
+    }
+  }
+
+  return ids.map((id) => ({
+    userId: id,
+    displayName: profileMap.get(id)?.displayName ?? currentMemberMap.get(id)?.displayName ?? "",
+    zaloName: profileMap.get(id)?.zaloName ?? currentMemberMap.get(id)?.zaloName ?? "",
+  }));
+}
+
+async function listGroupMentionMembers(api: API, threadId: string): Promise<GroupMentionMember[]> {
+  return await listGroupMemberRows(api, threadId);
 }
 
 async function refreshCacheForProfile(profile: string, api: API): Promise<{ friends: number; groups: number }> {
@@ -3039,22 +3115,20 @@ msg
   .command("send <threadId> <message>")
   .option("-g, --group", "Send to group")
   .option("--raw", "Send raw text without parsing formatting markers")
-  .description("Send text message with formatting (**bold** *italic* __bold__ ~~strike~~ {underline}text{/underline} {red}color{/red} {big}size{/big} lists indents)")
+  .description("Send text message with formatting (**bold** *italic* __bold__ ~~strike~~ {underline}text{/underline} {red}color{/red} {big}size{/big} lists indents). Group sends also resolve unique @Name mentions.")
   .action(
     wrapAction(async (threadId: string, message: string, opts: { group?: boolean; raw?: boolean }, command: Command) => {
       const { api } = await requireApi(command);
-      if (opts.raw) {
-        const response = await api.sendMessage(message, threadId, asThreadType(opts.group));
-        output(response, false);
-      } else {
-        const { text, styles } = parseTextStyles(message);
-        const response = await api.sendMessage(
-          { msg: text, styles: styles.length > 0 ? styles : undefined },
-          threadId,
-          asThreadType(opts.group),
-        );
-        output(response, false);
-      }
+      const threadType = asThreadType(opts.group);
+      const payload = await buildTextSendPayload({
+        message,
+        raw: opts.raw,
+        threadType,
+        threadId,
+        listGroupMembers: threadType === ThreadType.Group ? (groupId) => listGroupMentionMembers(api, groupId) : undefined,
+      });
+      const response = await api.sendMessage(payload, threadId, threadType);
+      output(response, false);
     }),
   );
 
@@ -3783,72 +3857,7 @@ group
   .action(
     wrapAction(async (groupId: string, opts: { json?: boolean }, command: Command) => {
       const { api } = await requireApi(command);
-      const info = await api.getGroupInfo(groupId);
-      const groupInfo = info.gridInfoMap[groupId];
-      if (!groupInfo) {
-        throw new Error(`Group not found: ${groupId}`);
-      }
-
-      const normalizeMemberId = (value: unknown): string => {
-        if (typeof value === "number" && Number.isFinite(value)) {
-          return String(Math.trunc(value));
-        }
-        if (typeof value !== "string") return "";
-        const trimmed = value.trim();
-        if (!trimmed) return "";
-        return trimmed.replace(/_\d+$/, "");
-      };
-
-      const idsFromMemberIds = Array.isArray(groupInfo.memberIds)
-        ? groupInfo.memberIds.map((id) => normalizeMemberId(id)).filter(Boolean)
-        : [];
-      const memVerList = (groupInfo as { memVerList?: unknown }).memVerList;
-      const idsFromMemVerList = Array.isArray(memVerList)
-        ? memVerList.map((id) => normalizeMemberId(id)).filter(Boolean)
-        : [];
-
-      const currentMems = Array.isArray(groupInfo.currentMems) ? groupInfo.currentMems : [];
-      const currentMemberMap = new Map<string, { displayName: string; zaloName: string }>();
-      for (const member of currentMems) {
-        const userId = normalizeMemberId(member.id);
-        if (!userId) continue;
-        currentMemberMap.set(userId, {
-          displayName: member.dName?.trim() || member.zaloName?.trim() || "",
-          zaloName: member.zaloName?.trim() || "",
-        });
-      }
-
-      const ids = Array.from(
-        new Set<string>([
-          ...idsFromMemberIds,
-          ...idsFromMemVerList,
-          ...Array.from(currentMemberMap.keys()),
-        ]),
-      );
-
-      const profiles = ids.length > 0 ? await api.getGroupMembersInfo(ids) : { profiles: {} };
-      const rawProfileMap = profiles.profiles as Record<
-        string,
-        { id?: string; displayName?: string; zaloName?: string } | undefined
-      >;
-      const profileMap = new Map<string, { displayName?: string; zaloName?: string }>();
-      for (const [key, profile] of Object.entries(rawProfileMap)) {
-        if (!profile) continue;
-        const normalizedKey = normalizeMemberId(key);
-        if (normalizedKey && !profileMap.has(normalizedKey)) {
-          profileMap.set(normalizedKey, profile);
-        }
-        const profileId = normalizeMemberId(profile.id);
-        if (profileId && !profileMap.has(profileId)) {
-          profileMap.set(profileId, profile);
-        }
-      }
-
-      const rows = ids.map((id) => ({
-        userId: id,
-        displayName: profileMap.get(id)?.displayName ?? currentMemberMap.get(id)?.displayName ?? "",
-        zaloName: profileMap.get(id)?.zaloName ?? currentMemberMap.get(id)?.zaloName ?? "",
-      }));
+      const rows = await listGroupMemberRows(api, groupId);
 
       if (opts.json) {
         output(rows, true);

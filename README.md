@@ -36,6 +36,9 @@ openzca msg send USER_ID "Hello"
 # Send to a group
 openzca msg send GROUP_ID "Hello team" --group
 
+# Mention a group member by display name or username
+openzca msg send GROUP_ID "Hi @Alice Nguyen" --group
+
 # Listen for incoming messages
 openzca listen
 ```
@@ -80,6 +83,7 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 
 Media commands accept local files, `file://` paths, and repeatable `--url` options. Add `--group` for group threads.
 Local paths using `~` are expanded automatically (for positional file args, `--url`, and `OPENZCA_LISTEN_MEDIA_DIR`).
+Group text sends via `openzca msg send --group` resolve unique `@Name` mentions against the current group member list using display names and usernames. Mention offsets are computed after formatting markers are parsed, so messages like `**@Alice Nguyen** hello` work. If multiple members share the same label, the command fails instead of guessing.
 
 ### Debug Logging
 
