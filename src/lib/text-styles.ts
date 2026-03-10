@@ -53,8 +53,9 @@ const INLINE_MARKERS: { pattern: RegExp; style: TextStyle | null; extraStyles?: 
  *   > text          → indent
  *   leading spaces  → indent
  *
- * Fenced code blocks are downgraded to plain text with literal whitespace
- * preserved and inline markdown parsing disabled inside the block.
+ * Fenced code blocks are downgraded to plain text with fence markers stripped,
+ * leading indentation preserved via non-breaking spaces, and inline markdown
+ * parsing disabled inside the block.
  */
 export function parseTextStyles(input: string): { text: string; styles: Style[] } {
   const allStyles: Style[] = [];
@@ -69,7 +70,7 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
   const lines = escapedInput.split("\n");
   const lineStyles: LineStyle[] = [];
   const processedLines: string[] = [];
-  const codeBlockLineIndices = new Set<number>();
+  const codeOutputLineIndices = new Set<number>();
   let inCodeBlock = false;
 
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
@@ -77,14 +78,12 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
     let baseIndent = 0;
 
     if (/^```/.test(line)) {
-      codeBlockLineIndices.add(lineIndex);
-      processedLines.push(line);
       inCodeBlock = !inCodeBlock;
       continue;
     }
 
     if (inCodeBlock) {
-      codeBlockLineIndices.add(lineIndex);
+      codeOutputLineIndices.add(processedLines.length);
       processedLines.push(normalizeCodeBlockLeadingWhitespace(line));
       continue;
     }
@@ -154,7 +153,7 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
     processedLines.push(line);
   }
 
-  for (const codeLineIndex of codeBlockLineIndices) {
+  for (const codeLineIndex of codeOutputLineIndices) {
     if (codeLineIndex >= processedLines.length) {
       continue;
     }

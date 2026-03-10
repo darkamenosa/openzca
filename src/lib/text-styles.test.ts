@@ -12,30 +12,37 @@ test("converts leading whitespace into Zalo indent styles", () => {
   });
 });
 
-test("preserves fenced code blocks with leading indentation as non-breaking spaces", () => {
+test("strips fenced code markers and preserves leading indentation as non-breaking spaces", () => {
   assert.deepStrictEqual(parseTextStyles("```\n  code\n    deeper\n```"), {
-    text: "```\n\u00A0\u00A0code\n\u00A0\u00A0\u00A0\u00A0deeper\n```",
+    text: "\u00A0\u00A0code\n\u00A0\u00A0\u00A0\u00A0deeper",
     styles: [],
   });
 });
 
 test("keeps unindented fenced code lines untouched", () => {
   assert.deepStrictEqual(parseTextStyles("```\nconst x = 1\n  return x\n```"), {
-    text: "```\nconst x = 1\n\u00A0\u00A0return x\n```",
+    text: "const x = 1\n\u00A0\u00A0return x",
     styles: [],
   });
 });
 
 test("keeps markdown markers literal inside fenced code blocks", () => {
   assert.deepStrictEqual(parseTextStyles("```\n**bold**\n{red}x{/red}\n```"), {
-    text: "```\n**bold**\n{red}x{/red}\n```",
+    text: "**bold**\n{red}x{/red}",
     styles: [],
   });
 });
 
 test("expands leading tabs inside fenced code blocks", () => {
   assert.deepStrictEqual(parseTextStyles("```\n\tcode\n```"), {
-    text: "```\n\u00A0\u00A0\u00A0\u00A0code\n```",
+    text: "\u00A0\u00A0\u00A0\u00A0code",
+    styles: [],
+  });
+});
+
+test("strips fenced code language markers", () => {
+  assert.deepStrictEqual(parseTextStyles("```javascript\n  const x = 1\n```"), {
+    text: "\u00A0\u00A0const x = 1",
     styles: [],
   });
 });
@@ -153,7 +160,7 @@ test("parses a mixed markdown document with headings, lists, tags, escapes, and 
   ].join("\n");
 
   assert.deepStrictEqual(parseTextStyles(input), {
-    text: "Title\nquote with bold\nfirst\nchild hot\n- [x] done\nplain *star* and tag\n```\n\u00A0\u00A0const x = 1\n```",
+    text: "Title\nquote with bold\nfirst\nchild hot\n- [x] done\nplain *star* and tag\n\u00A0\u00A0const x = 1",
     styles: [
       { start: 17, len: 4, st: TextStyle.Bold },
       { start: 34, len: 3, st: TextStyle.Red },
