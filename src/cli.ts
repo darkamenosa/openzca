@@ -224,20 +224,41 @@ function asThreadType(groupFlag?: boolean): ThreadType {
  *   # heading       → big + bold
  *   ## heading      → bold
  *   ### heading     → bold + small
- *   ####-###### h   → bold
+ *   #### heading    → bold
  *   - item / * item / + item → unordered list
  *   1. item         → ordered list
  *   > text          → indent (each > adds one level)
- *   Nested lists: leading whitespace + marker → indent + list
+ *   Nested lists: leading whitespace + list marker → indent + list
  *
+ * Code blocks: ``` fences stripped, content preserved with whitespace.
+ * Checkboxes: - [x] / - [ ] kept as-is.
+ * Leading whitespace on plain text is preserved.
  * Escape: \* \_ \~ \# \\ → literal character
  */
 function parseTextStyles(input: string): { text: string; styles: Style[] } {
   const allStyles: Style[] = [];
 
-  // --- Phase 0: handle escape sequences ---
-  // Replace \<char> with a placeholder so markers don't match, restore later.
-  // Use \x01...\x02 control chars as delimiters (no markdown-significant chars).
+  // --- Phase 0: strip code fences and protect code content ---
+  // Process line-by-line: strip ``` fence lines, track which output lines are code.
+  const codeLineIndices: Set<number> = new Set();
+  {
+    const rawLines = input.split("\n");
+    const kept: string[] = [];
+    let inCode = false;
+    for (const rawLine of rawLines) {
+      if (/^```/.test(rawLine)) {
+        inCode = !inCode;
+        continue; // drop fence line
+      }
+      if (inCode) {
+        codeLineIndices.add(kept.length);
+      }
+      kept.push(rawLine);
+    }
+    input = kept.join("\n");
+  }
+
+  // Handle escape sequences: \<char> → placeholder \x01<idx>\x02
   const escapeMap: string[] = [];
   const escaped = input.replace(/\\([*_~#\\{}>+\-])/g, (_match, ch: string) => {
     const idx = escapeMap.length;
@@ -253,13 +274,19 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
   for (let i = 0; i < lines.length; i++) {
     let line = lines[i];
 
-    // Headings: # through ######
-    const headingMatch = line.match(/^(#{1,6})\s(.*)$/);
+    // Skip formatting for code block lines — preserve content as-is
+    if (codeLineIndices.has(i)) {
+      processedLines.push(line);
+      continue;
+    }
+
+    // Headings: # through #### only (H1-H4)
+    const headingMatch = line.match(/^(#{1,4})\s(.*)$/);
     if (headingMatch) {
       const level = headingMatch[1].length;
       lineStyles.push({ lineIndex: i, style: TextStyle.Bold });
       if (level === 1) lineStyles.push({ lineIndex: i, style: TextStyle.Big });
-      else if (level >= 3) lineStyles.push({ lineIndex: i, style: TextStyle.Small });
+      else if (level === 3 || level === 4) lineStyles.push({ lineIndex: i, style: TextStyle.Small });
       processedLines.push(headingMatch[2]);
       continue;
     }
@@ -272,13 +299,19 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
       // Fall through to check if remaining content is a list item
     }
 
-    // Detect leading whitespace for nested lists → indent level
+    // Detect leading whitespace — only used for nested list indentation
     const indentContentMatch = line.match(/^(\s+)(.*)$/);
     let indentLevel = 0;
     let content = line;
     if (indentContentMatch) {
       indentLevel = Math.max(1, Math.floor(indentContentMatch[1].length / 2));
       content = indentContentMatch[2];
+    }
+
+    // Checkbox lines: - [x] or - [ ] — keep as-is, do not parse as list
+    if (/^[-*+]\s\[[ xX]\]\s/.test(content)) {
+      processedLines.push(line);
+      continue;
     }
 
     // Ordered list: "1. ", "2. ", etc.
@@ -303,14 +336,19 @@ function parseTextStyles(input: string): { text: string; styles: Style[] } {
       continue;
     }
 
-    // Plain indented line (not a list) with leading whitespace
-    if (indentLevel > 0) {
-      lineStyles.push({ lineIndex: i, style: TextStyle.Indent, indentSize: indentLevel });
-      processedLines.push(content);
-      continue;
-    }
-
+    // Plain text with leading whitespace — preserve as-is (no Indent style)
     processedLines.push(line);
+  }
+
+  // Protect code block lines from inline parsing by escaping markdown chars
+  for (const ci of codeLineIndices) {
+    if (ci < processedLines.length) {
+      processedLines[ci] = processedLines[ci].replace(/[*_~{}]/g, (ch) => {
+        const idx = escapeMap.length;
+        escapeMap.push(ch);
+        return `\x01${idx}\x02`;
+      });
+    }
   }
 
   const inlineInput = processedLines.join("\n");
