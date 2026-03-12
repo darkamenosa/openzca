@@ -126,6 +126,11 @@ For media debugging, grep these events in the debug log:
 | `openzca group info <groupId>` | Get group details |
 | `openzca group members <groupId>` | List members |
 | `openzca group create <name> <members...>` | Create a group |
+| `openzca group poll create <groupId>` | Create a poll (`--question`, repeatable `--option`, optional poll flags) |
+| `openzca group poll detail <pollId>` | Get poll details |
+| `openzca group poll vote <pollId>` | Vote on a poll with repeatable `--option <id>` |
+| `openzca group poll lock <pollId>` | Close a poll |
+| `openzca group poll share <pollId>` | Share a poll |
 | `openzca group rename <groupId> <name>` | Rename group |
 | `openzca group avatar <groupId> <file>` | Change group avatar |
 | `openzca group settings <groupId>` | Update settings (`--lock-name`, `--sign-admin`, etc.) |
@@ -145,6 +150,8 @@ For media debugging, grep these events in the debug log:
 | `openzca group review <groupId> <userId> <action>` | Approve or deny join request |
 | `openzca group leave <groupId>` | Leave group |
 | `openzca group disperse <groupId>` | Disperse group |
+
+Poll creation currently targets group threads only and maps to the existing `zca-js` group poll APIs. `group poll create` requires `--question` plus at least two `--option` values, and also supports `--multi`, `--allow-add-option`, `--hide-vote-preview`, `--anonymous`, and `--expire-ms`.
 
 ### friend — Friend management
 

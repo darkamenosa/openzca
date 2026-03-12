@@ -81,6 +81,11 @@ Group text sends resolve unique `@Name` or `@userId` mentions against the curren
 - `openzca group info <groupId>`
 - `openzca group members <groupId> [--json]`
 - `openzca group create <name> <members...>`
+- `openzca group poll create <groupId> --question <text> --option <text> [--option <text> ...] [--multi] [--allow-add-option] [--hide-vote-preview] [--anonymous] [--expire-ms <ms>]`
+- `openzca group poll detail <pollId>`
+- `openzca group poll vote <pollId> --option <id> [--option <id> ...]`
+- `openzca group poll lock <pollId>`
+- `openzca group poll share <pollId>`
 - `openzca group rename <groupId> <name>`
 - `openzca group avatar <groupId> <file>`
 - `openzca group settings <groupId> [--lock-name] [--unlock-name] [--sign-admin] [--no-sign-admin]`

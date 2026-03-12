@@ -54,6 +54,11 @@ import {
   normalizeInputList,
 } from "./lib/media.js";
 import {
+  buildCreatePollOptions,
+  parsePollId,
+  parsePollOptionIds,
+} from "./lib/group-poll.js";
+import {
   type GroupMentionMember,
 } from "./lib/group-mentions.js";
 import { buildTextSendPayload } from "./lib/text-send.js";
@@ -3879,6 +3884,96 @@ group
         members,
       });
       output(response, false);
+    }),
+  );
+
+const groupPoll = group.command("poll").description("Group poll management");
+
+groupPoll
+  .command("create <groupId>")
+  .requiredOption("-q, --question <text>", "Poll question")
+  .requiredOption("-o, --option <text>", "Poll option (repeatable)", collectValues, [] as string[])
+  .option("--multi", "Allow multiple choices")
+  .option("--allow-add-option", "Allow members to add new options")
+  .option("--hide-vote-preview", "Hide results until the member votes")
+  .option("--anonymous", "Hide voters")
+  .option("--expire-ms <ms>", "Poll expiration time in milliseconds")
+  .description("Create a poll in a group")
+  .action(
+    wrapAction(
+      async (
+        groupId: string,
+        opts: {
+          question?: string;
+          option?: string[];
+          multi?: boolean;
+          allowAddOption?: boolean;
+          hideVotePreview?: boolean;
+          anonymous?: boolean;
+          expireMs?: string;
+        },
+        command: Command,
+      ) => {
+        const pollOptions = buildCreatePollOptions(opts);
+        const { api } = await requireApi(command);
+        output(await api.createPoll(pollOptions, groupId), false);
+      },
+    ),
+  );
+
+groupPoll
+  .command("detail <pollId>")
+  .description("Get poll detail")
+  .action(
+    wrapAction(async (pollId: string, command: Command) => {
+      const normalizedPollId = parsePollId(pollId);
+      const { api } = await requireApi(command);
+      output(await api.getPollDetail(normalizedPollId), false);
+    }),
+  );
+
+groupPoll
+  .command("vote <pollId>")
+  .requiredOption("-o, --option <id>", "Poll option id (repeatable)", collectValues, [] as string[])
+  .description("Vote on a group poll")
+  .action(
+    wrapAction(
+      async (
+        pollId: string,
+        opts: { option?: string[] },
+        command: Command,
+      ) => {
+        const normalizedPollId = parsePollId(pollId);
+        const optionIds = parsePollOptionIds(opts.option);
+        const { api } = await requireApi(command);
+        const response = await api.votePoll(
+          normalizedPollId,
+          optionIds.length === 1 ? optionIds[0] : optionIds,
+        );
+        output(response, false);
+      },
+    ),
+  );
+
+groupPoll
+  .command("lock <pollId>")
+  .description("Close a poll")
+  .action(
+    wrapAction(async (pollId: string, command: Command) => {
+      const normalizedPollId = parsePollId(pollId);
+      const { api } = await requireApi(command);
+      output(await api.lockPoll(normalizedPollId), false);
+    }),
+  );
+
+groupPoll
+  .command("share <pollId>")
+  .description("Share a poll")
+  .action(
+    wrapAction(async (pollId: string, command: Command) => {
+      const normalizedPollId = parsePollId(pollId);
+      const { api } = await requireApi(command);
+      output(await api.sharePoll(normalizedPollId), false);
     }),
   );
 

@@ -92,10 +92,10 @@ Required order — always execute in this exact sequence:
 npm version <new_version> --no-git-tag-version
 
 # Validate
-npm run lint && npm run typecheck && npm run build
+npm test && npm run lint && npm run typecheck && npm run build
 
 # 2) Commit
-git add package.json package-lock.json README.md docs/ src/ AGENTS.md
+git add package.json package-lock.json README.md docs/ src/ tests/ AGENTS.md CLAUDE.md
 git commit -m "release: v<new_version>"
 
 # 3) Tag
