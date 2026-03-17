@@ -62,7 +62,7 @@ Command groups:
 ## Messaging Commands
 - `openzca msg send <threadId> <message> [--group]`
 - `openzca msg image <threadId> [file] [--group] [-u|--url <url> ...] [-m|--message <text>]`
-- `openzca msg video <threadId> [file] [--group] [-u|--url <url> ...] [--thumbnail <url>] [-m|--message <text>]`
+- `openzca msg video <threadId> [file] [--group] [-u|--url <url> ...] [--thumbnail <path-or-url>] [-m|--message <text>]`
 - `openzca msg voice <threadId> [file] [--group] [-u|--url <url> ...]`
 - `openzca msg sticker <threadId> <stickerId> [--group]`
 - `openzca msg link <threadId> <url> [--group]`
@@ -75,6 +75,8 @@ Command groups:
 - `openzca msg upload [file] <threadId> [--group] [-u|--url <url> ...]`
 
 Group text sends resolve unique `@Name` or `@userId` mentions against the current group roster using member ids, display names, and usernames. Formatting is parsed before mention offsets are calculated, so styled mentions such as `**@Alice Nguyen**` still resolve correctly. If more than one member matches the same label, the send fails instead of picking one arbitrarily.
+
+`msg video` attempts native video mode for a single `.mp4` input by generating or accepting a thumbnail, uploading both assets to Zalo, and calling the dedicated `sendVideo` API. If `ffmpeg` is unavailable, the input is unsupported, or native send fails, it falls back to the generic attachment flow.
 
 ## Group Commands
 - `openzca group list [--json]`

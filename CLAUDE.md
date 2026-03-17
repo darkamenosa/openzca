@@ -10,6 +10,7 @@ openzca is a Node.js CLI for Zalo messaging (command-compatible with zca-cli.dev
 
 ```bash
 npm install          # install dependencies
+npm test             # run the Node test suite via tsx
 npm run build        # build with tsup (ESM, node18 target) → dist/
 npm run dev          # run directly via tsx (no build needed)
 npm run typecheck    # full TypeScript check (tsc --noEmit)
@@ -17,7 +18,7 @@ npm run lint         # same as typecheck
 node dist/cli.js     # run built CLI
 ```
 
-There are no tests in this project.
+Tests live in `tests/*.test.ts` and selected `src/lib/*.test.ts` files, using the Node test runner through `tsx`.
 
 ## Architecture
 
@@ -27,6 +28,7 @@ This is a single-entrypoint CLI app. All source lives in `src/`:
 - **`src/lib/client.ts`** — Zalo API client wrapper: QR login, credential-based login, session creation via `zca-js`.
 - **`src/lib/store.ts`** — Profile/credential/cache persistence under `~/.openzca/`. Multi-profile support with `profiles.json` and per-profile `credentials.json` + cache.
 - **`src/lib/media.ts`** — Media file handling utilities: URL downloading to temp files, file validation, tilde expansion, content-type mapping.
+- **`src/lib/video-send.ts`** — Native video-send helper: `ffmpeg`/`ffprobe` detection, local thumbnail generation, Zalo upload orchestration, and fallback decision logic for `msg video`.
 - **`src/lib/types.ts`** — Shared TypeScript interfaces (`StoredCredentials`, `ProfilesDb`, `ProfileCachePayload`, `ProfileMeta`).
 
 Key patterns:
@@ -53,6 +55,11 @@ All commands use the pattern: `zca --profile <profile> <command> [args]`
 | Profile | `me info -j`, `me id` |
 
 Key flags: `-j` (JSON output), `-r` (raw mode), `-k` (keep-alive), `-g` (group target), `-u` (media URL), `-m` (caption).
+
+Video send behavior:
+- `msg video` now attempts native Zalo display-video mode for a single local or downloaded `.mp4` by generating or accepting a thumbnail, uploading both assets to Zalo, and calling `api.sendVideo(...)`.
+- Native mode requires `ffmpeg`; if `ffmpeg` is unavailable, the input is not a single `.mp4`, or native send fails, the command falls back to the older `api.sendMessage({ attachments })` path.
+- Video/file uploads must run under the upload-listener flow (`withUploadListener(...)`) because `zca-js` waits for the websocket `file_done` callback before resolving uploads.
 
 ### Known plugin limitations (motivation for future improvements)
 

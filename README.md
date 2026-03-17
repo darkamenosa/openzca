@@ -69,7 +69,7 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 |---------|-------------|
 | `openzca msg send <threadId> <message>` | Send text message |
 | `openzca msg image <threadId> [file]` | Send image(s) from file or URL |
-| `openzca msg video <threadId> [file]` | Send video(s) from file or URL |
+| `openzca msg video <threadId> [file]` | Send video(s) from file or URL; single `.mp4` inputs try native video mode |
 | `openzca msg voice <threadId> [file]` | Send voice message from local file or URL (`.aac`, `.mp3`, `.m4a`, `.wav`, `.ogg`) |
 | `openzca msg sticker <threadId> <stickerId>` | Send a sticker |
 | `openzca msg link <threadId> <url>` | Send a link |
@@ -83,6 +83,7 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 | `openzca msg recent <threadId>` | List recent messages (`-n`, `--json`, newest-first); group mode prefers direct group-history endpoint (websocket fallback) |
 
 Media commands accept local files, `file://` paths, and repeatable `--url` options. Add `--group` for group threads.
+`openzca msg video` attempts native video send for a single `.mp4` input by uploading the video and thumbnail to Zalo first. If `ffmpeg` is unavailable, the input is not a single `.mp4`, or native send fails, it falls back to the normal attachment send path. Use `--thumbnail <path-or-url>` to supply the preview image explicitly.
 Local paths using `~` are expanded automatically (for positional file args, `--url`, and `OPENZCA_LISTEN_MEDIA_DIR`).
 Group text sends via `openzca msg send --group` resolve unique `@Name` or `@userId` mentions against the current group member list using member ids, display names, and usernames. Mention offsets are computed after formatting markers are parsed, so messages like `**@Alice Nguyen** hello` work. If multiple members share the same label, the command fails instead of guessing.
 

@@ -62,6 +62,7 @@ import {
   type GroupMentionMember,
 } from "./lib/group-mentions.js";
 import { buildTextSendPayload } from "./lib/text-send.js";
+import { isFfmpegAvailable, planVideoSendMode, sendNativeVideo } from "./lib/video-send.js";
 
 const program = new Command();
 
@@ -3197,7 +3198,7 @@ msg
   .command("video <threadId> [file]")
   .option("-u, --url <url>", "Video URL (repeatable)", collectValues, [] as string[])
   .option("-m, --message <message>", "Caption")
-  .option("--thumbnail <url>", "Thumbnail URL (kept for compatibility)")
+  .option("--thumbnail <pathOrUrl>", "Thumbnail image path or URL (optional)")
   .option("-g, --group", "Send to group")
   .description("Send video(s) from file or URL")
   .action(
@@ -3205,15 +3206,21 @@ msg
       async (
         threadId: string,
         file: string | undefined,
-        opts: { url?: string[]; message?: string; group?: boolean },
+        opts: { url?: string[]; message?: string; group?: boolean; thumbnail?: string },
         command: Command,
       ) => {
-        const { api } = await requireApi(command);
+        const { api, profile } = await requireApi(command);
+        const threadType = asThreadType(opts.group);
 
         const normalizedFile = file ? normalizeMediaInput(file) : undefined;
         const files = [normalizedFile, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
         const urlInputs = files.filter((entry) => isHttpUrl(entry));
         const localInputs = files.filter((entry) => !isHttpUrl(entry));
+        const normalizedThumbnail = opts.thumbnail ? normalizeMediaInput(opts.thumbnail) : undefined;
+        const thumbnailUrlInputs =
+          normalizedThumbnail && isHttpUrl(normalizedThumbnail) ? [normalizedThumbnail] : [];
+        const thumbnailLocalPath =
+          normalizedThumbnail && !isHttpUrl(normalizedThumbnail) ? normalizedThumbnail : undefined;
         writeDebugLine(
           "msg.video.inputs",
           {
@@ -3221,30 +3228,107 @@ msg
             isGroup: Boolean(opts.group),
             localInputs,
             urlInputs,
+            thumbnail: normalizedThumbnail,
           },
           command,
         );
 
         const downloaded = await downloadUrlsToTempFiles(urlInputs);
+        const downloadedThumbnail = await downloadUrlsToTempFiles(thumbnailUrlInputs);
         try {
           const attachments = [...localInputs, ...downloaded.files];
           if (attachments.length === 0) {
             throw new Error("Provide at least one video file or --url.");
           }
           await assertFilesExist(attachments);
+          if (thumbnailLocalPath) {
+            await assertFilesExist([thumbnailLocalPath]);
+          }
 
-          const response = await api.sendMessage(
-            {
-              msg: opts.message ?? "",
-              attachments,
-            },
-            threadId,
-            asThreadType(opts.group),
+          const enforceSingleOwner = parseBooleanFromEnv("OPENZCA_UPLOAD_ENFORCE_SINGLE_OWNER", true);
+          if (enforceSingleOwner) {
+            const owner = await readActiveListenerOwner(profile);
+            if (owner && owner.pid !== process.pid) {
+              throw new Error(
+                `Active listener owner detected for profile "${profile}" (pid ${owner.pid}), ` +
+                  "but video upload IPC is unavailable. Restart `openzca listen` with latest version " +
+                  "or set OPENZCA_UPLOAD_ENFORCE_SINGLE_OWNER=0 to allow fallback listener startup.",
+              );
+            }
+          }
+
+          const ffmpegAvailable = await isFfmpegAvailable();
+          const videoPlan = planVideoSendMode({
+            files: attachments,
+            ffmpegAvailable,
+          });
+
+          if (videoPlan.mode === "native") {
+            const thumbnailPath = thumbnailLocalPath ?? downloadedThumbnail.files[0];
+            try {
+              const response = await withUploadListener(api, command, async () =>
+                sendNativeVideo({
+                  api,
+                  threadId,
+                  threadType,
+                  videoPath: attachments[0],
+                  message: opts.message,
+                  thumbnailPath,
+                }),
+              );
+
+              writeDebugLine(
+                "msg.video.native.success",
+                {
+                  threadId,
+                  isGroup: Boolean(opts.group),
+                  videoPath: attachments[0],
+                  thumbnailPath: thumbnailPath ?? null,
+                },
+                command,
+              );
+              output(response, false);
+              return;
+            } catch (error) {
+              writeDebugLine(
+                "msg.video.native.failed",
+                {
+                  threadId,
+                  isGroup: Boolean(opts.group),
+                  videoPath: attachments[0],
+                  thumbnailPath: thumbnailPath ?? null,
+                  message: error instanceof Error ? error.message : String(error),
+                },
+                command,
+              );
+            }
+          } else {
+            writeDebugLine(
+              "msg.video.native.skipped",
+              {
+                threadId,
+                isGroup: Boolean(opts.group),
+                reason: videoPlan.reason,
+              },
+              command,
+            );
+          }
+
+          const response = await withUploadListener(api, command, async () =>
+            api.sendMessage(
+              {
+                msg: opts.message ?? "",
+                attachments,
+              },
+              threadId,
+              threadType,
+            ),
           );
 
           output(response, false);
         } finally {
           await downloaded.cleanup();
+          await downloadedThumbnail.cleanup();
         }
       },
     ),
