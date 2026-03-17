@@ -50,7 +50,7 @@ openzca listen
 
 | Command | Description |
 |---------|-------------|
-| `openzca auth login` | Login with QR code (`--qr-path <path>` to save QR image) |
+| `openzca auth login` | Login with QR code (`--qr-path <path>` to save QR image, `--qr-base64` for integration mode) |
 | `openzca auth login-cred [file]` | Login using a credential JSON file |
 | `openzca auth logout` | Remove saved credentials |
 | `openzca auth status` | Show login status |
@@ -67,7 +67,7 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 
 | Command | Description |
 |---------|-------------|
-| `openzca msg send <threadId> <message>` | Send text message |
+| `openzca msg send <threadId> <message>` | Send text with formatting (`**bold**`, `*italic*`, `~~strike~~`, etc.) and group @mention resolution (`--raw` to skip formatting) |
 | `openzca msg image <threadId> [file]` | Send image(s) from file or URL |
 | `openzca msg video <threadId> [file]` | Send video(s) from file or URL; single `.mp4` inputs try native video mode |
 | `openzca msg voice <threadId> [file]` | Send voice message from local file or URL (`.aac`, `.mp3`, `.m4a`, `.wav`, `.ogg`) |
@@ -78,9 +78,14 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 | `openzca msg typing <threadId>` | Send typing indicator |
 | `openzca msg forward <message> <targets...>` | Forward text to multiple targets |
 | `openzca msg delete <msgId> <cliMsgId> <uidFrom> <threadId>` | Delete a message |
+| `openzca msg edit <msgId> <cliMsgId> <threadId> <message>` | Edit message (undo + resend shim) |
 | `openzca msg undo <msgId> <cliMsgId> <threadId>` | Recall a sent message |
 | `openzca msg upload <arg1> [arg2]` | Upload and send file(s) |
 | `openzca msg recent <threadId>` | List recent messages (`-n`, `--json`, newest-first); group mode prefers direct group-history endpoint (websocket fallback) |
+| `openzca msg pin <threadId>` | Pin a conversation |
+| `openzca msg unpin <threadId>` | Unpin a conversation |
+| `openzca msg list-pins` | List pinned conversations |
+| `openzca msg member-info <userId>` | Get member/user profile info |
 
 Media commands accept local files, `file://` paths, and repeatable `--url` options. Add `--group` for group threads.
 `openzca msg video` attempts native video send for a single `.mp4` input by uploading the video and thumbnail to Zalo first. If `ffmpeg` is unavailable, the input is not a single `.mp4`, or native send fails, it falls back to the normal attachment send path. Use `--thumbnail <path-or-url>` to supply the preview image explicitly.
@@ -167,6 +172,7 @@ Poll creation currently targets group threads only and maps to the existing `zca
 | `openzca friend reject <userId>` | Reject friend request |
 | `openzca friend cancel <userId>` | Cancel sent friend request |
 | `openzca friend sent` | List sent requests |
+| `openzca friend request-status <userId>` | Check friend request status for user |
 | `openzca friend remove <userId>` | Remove a friend |
 | `openzca friend alias <userId> <alias>` | Set friend alias |
 | `openzca friend remove-alias <userId>` | Remove alias |
@@ -175,6 +181,7 @@ Poll creation currently targets group threads only and maps to the existing `zca
 | `openzca friend unblock <userId>` | Unblock user |
 | `openzca friend block-feed <userId>` | Block user from viewing your feed |
 | `openzca friend unblock-feed <userId>` | Unblock user from viewing your feed |
+| `openzca friend boards <conversationId>` | Get boards in conversation |
 
 ### me — Profile
 

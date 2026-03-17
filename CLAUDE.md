@@ -24,11 +24,15 @@ Tests live in `tests/*.test.ts` and selected `src/lib/*.test.ts` files, using th
 
 This is a single-entrypoint CLI app. All source lives in `src/`:
 
-- **`src/cli.ts`** (~3600 lines) — The entire CLI definition using Commander.js. Contains all command registration (auth, msg, group, friend, me, listen, account) and their action handlers in one file. This is the main file you'll edit for any command changes.
+- **`src/cli.ts`** (~5400 lines) — The entire CLI definition using Commander.js. Contains all command registration (auth, msg, group, friend, me, listen, account) and their action handlers in one file. This is the main file you'll edit for any command changes.
 - **`src/lib/client.ts`** — Zalo API client wrapper: QR login, credential-based login, session creation via `zca-js`.
 - **`src/lib/store.ts`** — Profile/credential/cache persistence under `~/.openzca/`. Multi-profile support with `profiles.json` and per-profile `credentials.json` + cache.
 - **`src/lib/media.ts`** — Media file handling utilities: URL downloading to temp files, file validation, tilde expansion, content-type mapping.
 - **`src/lib/video-send.ts`** — Native video-send helper: `ffmpeg`/`ffprobe` detection, local thumbnail generation, Zalo upload orchestration, and fallback decision logic for `msg video`.
+- **`src/lib/text-styles.ts`** — Markdown-to-Zalo text style parser: bold, italic, strikethrough, headings, lists, indents, blockquotes, fenced code, color/underline tags.
+- **`src/lib/text-send.ts`** — Text send payload builder: combines text styles and outbound group mentions into a final message payload.
+- **`src/lib/group-mentions.ts`** — Outbound @mention resolution for group messages: matches `@Name`/`@userId` against the group member list.
+- **`src/lib/group-poll.ts`** — Poll CLI validation helpers: poll ID parsing, option ID validation, and `CreatePollOptions` construction.
 - **`src/lib/types.ts`** — Shared TypeScript interfaces (`StoredCredentials`, `ProfilesDb`, `ProfileCachePayload`, `ProfileMeta`).
 
 Key patterns:

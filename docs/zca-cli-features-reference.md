@@ -39,6 +39,8 @@ Command groups:
 
 ## Global Options
 - `-p, --profile <name>`: run command on specific profile
+- `--debug`: enable debug logging
+- `--debug-file <path>`: debug log file path
 - `-h, --help`
 - `-V, --version`
 
@@ -51,7 +53,7 @@ Command groups:
 - `openzca account remove <name>` (alias: `rm`)
 
 ## Auth Commands
-- `openzca auth login [--qr-path <path>]`
+- `openzca auth login [--qr-path <path>] [--open-qr] [--qr-base64]`
 - `openzca auth login-creds [file]` (also supports `login-cred`)
 - `openzca auth logout`
 - `openzca auth status`
@@ -60,7 +62,7 @@ Command groups:
 - `openzca auth cache-clear`
 
 ## Messaging Commands
-- `openzca msg send <threadId> <message> [--group]`
+- `openzca msg send <threadId> <message> [--group] [--raw]`
 - `openzca msg image <threadId> [file] [--group] [-u|--url <url> ...] [-m|--message <text>]`
 - `openzca msg video <threadId> [file] [--group] [-u|--url <url> ...] [--thumbnail <path-or-url>] [-m|--message <text>]`
 - `openzca msg voice <threadId> [file] [--group] [-u|--url <url> ...]`
@@ -71,8 +73,14 @@ Command groups:
 - `openzca msg typing <threadId> [--group]`
 - `openzca msg forward <message> <targets...> [--group]`
 - `openzca msg delete <msgId> <cliMsgId> <uidFrom> <threadId> [--group] [--only-me]`
+- `openzca msg edit <msgId> <cliMsgId> <threadId> <message> [--group]` — edit message (undo + resend shim)
 - `openzca msg undo <msgId> <cliMsgId> <threadId> [--group]`
 - `openzca msg upload [file] <threadId> [--group] [-u|--url <url> ...]`
+- `openzca msg recent <threadId> [--group] [-n|--count <count>] [--json]` — list recent messages (newest first)
+- `openzca msg pin <threadId> [--group]` — pin conversation
+- `openzca msg unpin <threadId> [--group]` — unpin conversation
+- `openzca msg list-pins [--json]` — list pinned conversations
+- `openzca msg member-info <userId> [--json]` — get member/user profile info
 
 Group text sends resolve unique `@Name` or `@userId` mentions against the current group roster using member ids, display names, and usernames. Formatting is parsed before mention offsets are calculated, so styled mentions such as `**@Alice Nguyen**` still resolve correctly. If more than one member matches the same label, the send fails instead of picking one arbitrarily.
 
@@ -141,7 +149,7 @@ Group text sends resolve unique `@Name` or `@userId` mentions against the curren
 - `openzca me last-online <userId>`
 
 ## Listen Command
-- `openzca listen [--echo] [--prefix <text>] [--webhook <url>] [--raw] [--keep-alive]`
+- `openzca listen [--echo] [--prefix <text>] [--webhook <url>] [--raw] [--keep-alive] [--supervised] [--heartbeat-ms <ms>] [--recycle-ms <ms>]`
 
 Listener media behavior (openzca additions):
 - Non-text inbound messages can be normalized into media note text in `content`.
