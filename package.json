@@ -46,6 +46,8 @@
     "commander": "^14.0.3",
     "image-size": "^2.0.2",
     "qrcode-terminal": "^0.12.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1",
     "zca-js": "^2.1.2"
   },
   "devDependencies": {

@@ -42,6 +42,30 @@ openzca msg send GROUP_ID "Hi @123456789" --group
 
 # Listen for incoming messages
 openzca listen
+
+# Enable the local SQLite DB for this profile
+openzca db enable
+
+# Backfill full group history plus recent DM/chat windows into the DB
+openzca db sync
+
+# List stored groups
+openzca db group list --json
+
+# Show stored info for one group
+openzca db group info GROUP_ID --json
+
+# Read the last 24 hours for one group
+openzca db group messages GROUP_ID --since 24h --json
+
+# Read an explicit date range
+openzca db group messages GROUP_ID --from 2026-03-21T00:00:00+07:00 --to 2026-03-22T00:00:00+07:00 --json
+
+# Read the latest 20 stored rows by default
+openzca db group messages GROUP_ID --json
+
+# Read all matching rows
+openzca db group messages GROUP_ID --all --json
 ```
 
 ## Commands
@@ -81,7 +105,7 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 | `openzca msg edit <msgId> <cliMsgId> <threadId> <message>` | Edit message (undo + resend shim) |
 | `openzca msg undo <msgId> <cliMsgId> <threadId>` | Recall a sent message |
 | `openzca msg upload <arg1> [arg2]` | Upload and send file(s) |
-| `openzca msg recent <threadId>` | List recent messages (`-n`, `--json`, newest-first); group mode prefers direct group-history endpoint (websocket fallback) |
+| `openzca msg recent <threadId>` | List recent messages (`-n`, `--json`, newest-first); defaults to live history, supports `--source live|db|auto`; group mode prefers direct group-history endpoint (websocket fallback) |
 | `openzca msg pin <threadId>` | Pin a conversation |
 | `openzca msg unpin <threadId>` | Unpin a conversation |
 | `openzca msg list-pins` | List pinned conversations |
@@ -91,6 +115,7 @@ Media commands accept local files, `file://` paths, and repeatable `--url` optio
 `openzca msg video` attempts native video send for a single `.mp4` input by uploading the video and thumbnail to Zalo first. If `ffmpeg` is unavailable, the input is not a single `.mp4`, or native send fails, it falls back to the normal attachment send path. Use `--thumbnail <path-or-url>` to supply the preview image explicitly.
 Local paths using `~` are expanded automatically (for positional file args, `--url`, and `OPENZCA_LISTEN_MEDIA_DIR`).
 Group text sends via `openzca msg send --group` resolve unique `@Name` or `@userId` mentions against the current group member list using member ids, display names, and usernames. Mention offsets are computed after formatting markers are parsed, so messages like `**@Alice Nguyen** hello` work. If multiple members share the same label, the command fails instead of guessing.
+`msg recent` keeps the previous live behavior by default. Use `--source db` to read only from the local SQLite store, or `--source auto` to try DB first and fall back to live history.
 
 ### Debug Logging
 
@@ -197,6 +222,54 @@ Poll creation currently targets group threads only and maps to the existing `zca
 | `openzca me status <online\|offline>` | Set online status |
 | `openzca me last-online <userId>` | Check last online time |
 
+### db — Local SQLite source-of-truth
+
+| Command | Description |
+|---------|-------------|
+| `openzca db enable` | Enable profile-scoped SQLite persistence (`--path <sqlite-file>` optional) |
+| `openzca db disable` | Disable automatic DB persistence for the active profile |
+| `openzca db status` | Show DB status, counts, and configured path |
+| `openzca db me info` | Show the stored self profile snapshot |
+| `openzca db me id` | Show the stored self user ID |
+| `openzca db group list` | List groups stored in the DB |
+| `openzca db group info <groupId>` | Show stored info for a group |
+| `openzca db group members <groupId>` | List the stored member snapshot for a group |
+| `openzca db group messages <groupId>` | List stored messages for a group (defaults to latest 20 newest-first; use `--all`, `--since <duration>`, `--from`/`--to`, `--limit`, or `--oldest-first`) |
+| `openzca db friend list` | List friends stored in the DB |
+| `openzca db friend find <query>` | Find stored friends by user ID or name |
+| `openzca db friend info <userId>` | Show stored info for a friend |
+| `openzca db friend messages <userId>` | List stored direct-message rows for a friend (defaults to latest 20 newest-first; use `--all`, `--since <duration>`, `--from`/`--to`, `--limit`, or `--oldest-first`) |
+| `openzca db chat list` | List all chats stored in the DB |
+| `openzca db chat info <chatId>` | Show stored info for a chat (`-g` to force group lookup) |
+| `openzca db chat messages <chatId>` | List stored messages for any chat (`-g`; defaults to latest 20 newest-first; use `--all`, `--since <duration>`, `--from`/`--to`, `--limit`, or `--oldest-first`) |
+| `openzca db message get <id>` | Read a single stored message by `msgId`, `cliMsgId`, or internal message uid |
+| `openzca db sync` | Sync full group history, friend directory, and recent DM/chat windows into the DB |
+| `openzca db sync all` | Explicit full sync |
+| `openzca db sync groups` | Sync group directory, members, and full group history |
+| `openzca db sync friends` | Sync friend directory only |
+| `openzca db sync chats` | Sync discoverable chats and recent DM windows |
+| `openzca db sync group <groupId>` | Sync one group with full group history |
+| `openzca db sync chat <chatId>` | Sync one chat |
+
+The DB is per-profile and is intended to be a factual local store for later querying. By default it lives at:
+
+```text
+~/.openzca/profiles/<profile>/messages.sqlite
+```
+
+Notes:
+
+- DB reads are explicit. Existing live commands keep their current default behavior.
+- If DB is enabled, successful send commands and `listen` write in the background on a best-effort path so normal CLI flow is not blocked by SQLite work.
+- Group sync is thread-scoped and more reliable because it uses the dedicated group history API when available.
+- DM/chat sync is best-effort only. `zca-js` exposes old DM messages by user-message stream, not by exact DM thread, so `db sync chats` and `db sync chat <id>` should be treated as recent-window fills, not perfect historical mirrors.
+- For DMs, the DB stores messages under a stable peer-based conversation key rather than trusting the raw listener `threadId` alone.
+- Time filters accept:
+  - exact timestamps like `2026-03-21T10:00:00+07:00`
+  - unix seconds or milliseconds
+  - unix seconds or milliseconds
+  - relative durations like `7m`, `24h`, `1d`, or `1d2h30m`
+
 ### listen — Real-time listener
 
 | Command | Description |
@@ -206,6 +279,8 @@ Poll creation currently targets group threads only and maps to the existing `zca
 | `openzca listen --prefix <prefix>` | Only process messages matching prefix |
 | `openzca listen --webhook <url>` | POST message payload to a webhook URL |
 | `openzca listen --raw` | Output raw JSON per line |
+| `openzca listen --db` | Force DB writes for this listener session |
+| `openzca listen --no-db` | Disable DB writes for this listener session |
 | `openzca listen --keep-alive` | Auto-reconnect on disconnect |
 | `openzca listen --supervised --raw` | Supervisor mode with lifecycle JSON events (`session_id`, `connected`, `heartbeat`, `error`, `closed`) |
 | `openzca listen --keep-alive --recycle-ms <ms>` | Periodically recycle listener process to avoid stale sessions |
@@ -358,6 +433,8 @@ Profile data is stored in `~/.openzca/` (override with `OPENZCA_HOME`):
   profiles.json
   profiles/<name>/credentials.json
   profiles/<name>/cache/*.json
+  profiles/<name>/db.json
+  profiles/<name>/messages.sqlite
 ```
 
 ## Development

@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import readline from "node:readline/promises";
 
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require("../package.json");
@@ -39,6 +40,40 @@ import {
   writeCache,
 } from "./lib/store.js";
 import {
+  closeDb,
+  disableDb,
+  enableDb,
+  enqueueDbWrite,
+  findFriends,
+  getFriendInfo,
+  getDbConfigPath,
+  getDbStatus,
+  getMessageById,
+  getSelfProfile,
+  getThreadInfo,
+  isDbEnabled,
+  listChats,
+  listFriends,
+  listGroups,
+  listMessages,
+  listRecentMessages,
+  listSyncState,
+  listThreadMembers,
+  normalizeInboundListenRecord,
+  persistFriend,
+  persistMessage,
+  persistSelfProfile,
+  persistThread,
+  readDbConfig,
+  replaceThreadMembers,
+  resolveDbPath,
+  resolveScopeThreadId,
+  setSyncState,
+  type DbMedia,
+  type DbMention,
+  type DbThreadType,
+} from "./lib/db.js";
+import {
   createZaloClient,
   loginWithCredentialPayload,
   loginWithQrAndPersist,
@@ -58,6 +93,7 @@ import {
   parsePollId,
   parsePollOptionIds,
 } from "./lib/group-poll.js";
+import { parseDurationInput, parseTimeBoundaryInput } from "./lib/time-range.js";
 import {
   type GroupMentionMember,
 } from "./lib/group-mentions.js";
@@ -113,6 +149,27 @@ function commandPathLabel(command?: Command): string | undefined {
     current = current.parent ?? null;
   }
   return names.join(" ");
+}
+
+function readCliFlag(names: string[]): boolean {
+  const argv = process.argv.slice(2);
+  return argv.some((item) => names.includes(item));
+}
+
+function readCliOptionValue(names: string[]): string | undefined {
+  const argv = process.argv.slice(2);
+  for (let index = argv.length - 1; index >= 0; index -= 1) {
+    const item = argv[index];
+    for (const name of names) {
+      if (item === name) {
+        return argv[index + 1];
+      }
+      if (item.startsWith(`${name}=`)) {
+        return item.slice(name.length + 1);
+      }
+    }
+  }
+  return undefined;
 }
 
 function getDebugOptions(command?: Command): DebugOptions {
@@ -990,6 +1047,825 @@ async function requireApi(command?: Command): Promise<{ profile: string; api: AP
   return { profile, api };
 }
 
+function toDbThreadType(groupFlag?: boolean): DbThreadType {
+  return groupFlag ? "group" : "user";
+}
+
+function getDbWriteOverride(opts: { db?: boolean } | undefined): boolean | undefined {
+  if (!opts || typeof opts.db !== "boolean") {
+    return undefined;
+  }
+  return opts.db;
+}
+
+async function shouldWriteToDb(profile: string, override?: boolean): Promise<boolean> {
+  if (typeof override === "boolean") {
+    return override;
+  }
+  return isDbEnabled(profile);
+}
+
+function scheduleDbWrite(
+  profile: string,
+  command: Command | undefined,
+  event: string,
+  task: () => Promise<void>,
+): void {
+  enqueueDbWrite(profile, async () => {
+    try {
+      await task();
+    } catch (error) {
+      writeDebugLine(
+        event,
+        {
+          profile,
+          message: error instanceof Error ? error.message : String(error),
+        },
+        command,
+      );
+    }
+  });
+}
+
+function extractResponseMessageIds(value: unknown): string[] {
+  const ids = new Set<string>();
+  const visit = (item: unknown) => {
+    if (!item) return;
+    if (Array.isArray(item)) {
+      for (const nested of item) {
+        visit(nested);
+      }
+      return;
+    }
+    if (typeof item !== "object") {
+      return;
+    }
+    const record = item as Record<string, unknown>;
+    const msgId = normalizeCachedId(record.msgId);
+    if (msgId) {
+      ids.add(msgId);
+    }
+    for (const key of ["message", "attachment", "attachments", "results", "response"]) {
+      if (key in record) {
+        visit(record[key]);
+      }
+    }
+  };
+  visit(value);
+  return Array.from(ids);
+}
+
+async function persistOutgoingMessageBestEffort(params: {
+  profile: string;
+  api: API;
+  threadId: string;
+  group?: boolean;
+  text?: string;
+  msgType?: string;
+  response: unknown;
+  rawPayload?: unknown;
+  media?: DbMedia[];
+}): Promise<void> {
+  const selfId = params.api.getOwnId();
+  const threadType = toDbThreadType(params.group);
+  const scopeThreadId = resolveScopeThreadId({
+    threadType,
+    rawThreadId: params.threadId,
+    senderId: selfId,
+    toId: params.threadId,
+    selfId,
+  });
+  const messageIds = extractResponseMessageIds(params.response);
+  const baseRecord = {
+    profile: params.profile,
+    scopeThreadId,
+    rawThreadId: params.threadId,
+    threadType,
+    peerId: threadType === "user" ? scopeThreadId : undefined,
+    senderId: selfId,
+    senderName: undefined,
+    toId: threadType === "user" ? params.threadId : undefined,
+    timestampMs: Date.now(),
+    msgType: params.msgType,
+    contentText: params.text,
+    media: params.media,
+    source: "send",
+    rawPayloadJson: params.rawPayload ? JSON.stringify(params.rawPayload) : undefined,
+    rawMessageJson: JSON.stringify(params.response),
+  };
+
+  if (messageIds.length === 0) {
+    await persistMessage(baseRecord);
+    return;
+  }
+
+  for (const msgId of messageIds) {
+    await persistMessage({
+      ...baseRecord,
+      msgId,
+    });
+  }
+}
+
+async function persistGroupMembersSnapshot(
+  profile: string,
+  groupId: string,
+  api: API,
+): Promise<void> {
+  const rows = await listGroupMemberRows(api, groupId);
+  const snapshotAtMs = Date.now();
+  await replaceThreadMembers(
+    profile,
+    groupId,
+    rows.map((row) => ({
+      profile,
+      scopeThreadId: groupId,
+      userId: row.userId,
+      displayName: row.displayName,
+      zaloName: row.zaloName,
+      rawJson: JSON.stringify(row),
+      snapshotAtMs,
+    })),
+  );
+}
+
+async function persistFriendDirectory(profile: string, api: API): Promise<Map<string, string>> {
+  const friends = await api.getAllFriends();
+  const nameById = new Map<string, string>();
+
+  for (const friend of friends) {
+    const record = friend as Record<string, unknown>;
+    const userId = normalizeCachedId(record.userId);
+    if (!userId) continue;
+
+    const displayName =
+      typeof record.displayName === "string" && record.displayName.trim()
+        ? record.displayName.trim()
+        : undefined;
+    const zaloName =
+      typeof record.zaloName === "string" && record.zaloName.trim()
+        ? record.zaloName.trim()
+        : undefined;
+    const avatar =
+      typeof record.avatar === "string" && record.avatar.trim()
+        ? record.avatar.trim()
+        : undefined;
+    const title = displayName || zaloName || userId;
+
+    await persistFriend({
+      profile,
+      userId,
+      displayName,
+      zaloName,
+      avatar,
+      accountStatus:
+        typeof record.accountStatus === "number" && Number.isFinite(record.accountStatus)
+          ? Math.trunc(record.accountStatus)
+          : undefined,
+      rawJson: JSON.stringify(friend),
+    });
+
+    await persistThread({
+      profile,
+      scopeThreadId: userId,
+      rawThreadId: userId,
+      threadType: "user",
+      peerId: userId,
+      title,
+      rawJson: JSON.stringify(friend),
+    });
+
+    nameById.set(userId, title);
+  }
+
+  return nameById;
+}
+
+function parseSinceDuration(label: string, value?: string): number | undefined {
+  const parsed = parseDurationInput(value);
+  if (parsed !== undefined) {
+    return parsed;
+  }
+  if (!value || !value.trim()) {
+    return undefined;
+  }
+  throw new Error(
+    `${label} must be a relative duration like 30s, 7m, 24h, 7d, or 2w.`,
+  );
+}
+
+function parseTimeBoundary(label: string, value?: string): number | undefined {
+  const parsed = parseTimeBoundaryInput(value);
+  if (parsed !== undefined) {
+    return parsed;
+  }
+  if (!value || !value.trim()) {
+    return undefined;
+  }
+  throw new Error(
+    `${label} must be an ISO timestamp, a date, or unix seconds/ms.`,
+  );
+}
+
+function pickExclusiveOption(
+  primaryLabel: string,
+  primaryValue: string | undefined,
+  aliasLabel: string,
+  aliasValue: string | undefined,
+): string | undefined {
+  if (primaryValue?.trim() && aliasValue?.trim()) {
+    throw new Error(`Use either ${primaryLabel} or ${aliasLabel}, not both.`);
+  }
+  return primaryValue?.trim() ? primaryValue : aliasValue?.trim() ? aliasValue : undefined;
+}
+
+function resolveMessageTimeRange(opts: {
+  since?: string;
+  from?: string;
+  until?: string;
+  to?: string;
+}): { sinceMs?: number; untilMs?: number } {
+  const sinceValue = opts.since?.trim() ? opts.since : undefined;
+  const fromValue = opts.from?.trim() ? opts.from : undefined;
+  const untilValue = pickExclusiveOption("--until", opts.until, "--to", opts.to);
+
+  if (sinceValue && fromValue) {
+    throw new Error("Use either --since for a rolling window or --from/--to for an explicit range, not both.");
+  }
+
+  if (sinceValue && untilValue) {
+    throw new Error("Do not combine --since with --to/--until. Use --from/--to for explicit ranges.");
+  }
+
+  return {
+    sinceMs: sinceValue
+      ? parseSinceDuration("--since", sinceValue)
+      : parseTimeBoundary("--from", fromValue),
+    untilMs: parseTimeBoundary("--to/--until", untilValue),
+  };
+}
+
+function resolveMessageQueryOptions(opts: {
+  since?: string;
+  from?: string;
+  until?: string;
+  to?: string;
+  limit?: string;
+  all?: boolean;
+  oldestFirst?: boolean;
+}): { sinceMs?: number; untilMs?: number; limit?: number; newestFirst: boolean } {
+  const { sinceMs, untilMs } = resolveMessageTimeRange(opts);
+  if (opts.all && opts.limit?.trim()) {
+    throw new Error("Use either --all or --limit, not both.");
+  }
+
+  const explicitLimit = parsePositiveIntOption("--limit", opts.limit);
+  const hasTimeFilter = sinceMs !== undefined || untilMs !== undefined;
+  const limit = opts.all ? undefined : explicitLimit ?? (hasTimeFilter ? undefined : 20);
+  const newestFirst = !Boolean(opts.oldestFirst);
+
+  return {
+    sinceMs,
+    untilMs,
+    limit,
+    newestFirst,
+  };
+}
+
+async function resolveStoredChatThreadType(
+  profile: string,
+  chatId: string,
+  forceGroup?: boolean,
+): Promise<DbThreadType> {
+  if (forceGroup) {
+    return "group";
+  }
+  const row = await getThreadInfo({ profile, threadId: chatId });
+  return row?.threadType === "group" ? "group" : "user";
+}
+
+async function confirmDestructiveAction(message: string): Promise<boolean> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("Refusing destructive operation without --yes in non-interactive mode.");
+  }
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    const answer = (await rl.question(`${message} [y/N] `)).trim().toLowerCase();
+    return answer === "y" || answer === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
+type SyncProgressReporter = (message: string) => void;
+
+function createSyncProgressReporter(): SyncProgressReporter {
+  if (!process.stderr.isTTY) {
+    return () => {};
+  }
+  return (message: string) => {
+    process.stderr.write(`[db sync] ${message}\n`);
+  };
+}
+
+type DbSyncSummary = {
+  profile: string;
+  dbPath: string;
+  windowCount?: number;
+  groupsSynced: number;
+  groupMessagesImported: number;
+  friendsSynced: number;
+  chatsSynced: number;
+  dmMessagesImported: number;
+  syncState: Record<string, unknown>[];
+};
+
+function createDbSyncSummary(profile: string, dbPath: string, count?: number): DbSyncSummary {
+  return {
+    profile,
+    dbPath,
+    windowCount: count,
+    groupsSynced: 0,
+    groupMessagesImported: 0,
+    friendsSynced: 0,
+    chatsSynced: 0,
+    dmMessagesImported: 0,
+    syncState: [],
+  };
+}
+
+function resolveSyncWindowCount(value?: string): number {
+  return parsePositiveIntOption("--count", value) ?? 200;
+}
+
+async function collectConversationIds(api: API): Promise<{
+  pinnedIds: Set<string>;
+  hiddenIds: Set<string>;
+}> {
+  let pinnedIds = new Set<string>();
+  let hiddenIds = new Set<string>();
+
+  try {
+    const pins = await api.getPinConversations();
+    pinnedIds = new Set((pins.conversations ?? []).map((value) => String(value)));
+  } catch {
+    // Best effort metadata.
+  }
+
+  try {
+    const hidden = await api.getHiddenConversations();
+    hiddenIds = new Set((hidden.threads ?? []).map((item) => String(item.thread_id)));
+  } catch {
+    // Best effort metadata.
+  }
+
+  return { pinnedIds, hiddenIds };
+}
+
+async function prepareDbGroupTarget(params: {
+  profile: string;
+  api: API;
+  groupId: string;
+  title?: string;
+  rawJson?: string;
+  pinnedIds: Set<string>;
+  hiddenIds: Set<string>;
+}): Promise<void> {
+  await persistThread({
+    profile: params.profile,
+    scopeThreadId: params.groupId,
+    rawThreadId: params.groupId,
+    threadType: "group",
+    title: params.title,
+    isPinned: params.pinnedIds.has(params.groupId),
+    isHidden: params.hiddenIds.has(params.groupId),
+    rawJson: params.rawJson,
+  });
+  await persistGroupMembersSnapshot(params.profile, params.groupId, params.api);
+}
+
+async function syncDbGroupHistoryFull(params: {
+  profile: string;
+  api: API;
+  selfId: string;
+  targetGroupIds: Set<string>;
+  titleById: Map<string, string | undefined>;
+  summary: DbSyncSummary;
+  progress?: SyncProgressReporter;
+}): Promise<void> {
+  if (params.targetGroupIds.size === 0) {
+    return;
+  }
+
+  const getStoredGroupMessageCount = async (): Promise<number> => {
+    let total = 0;
+    for (const groupId of params.targetGroupIds) {
+      const row = await getThreadInfo({
+        profile: params.profile,
+        threadId: groupId,
+        threadType: "group",
+      });
+      const count =
+        row && typeof row.messageCount === "number" && Number.isFinite(row.messageCount)
+          ? row.messageCount
+          : 0;
+      total += count;
+    }
+    return total;
+  };
+
+  const persistMessages = async (messages: RecentThreadMessage[]) => {
+    for (const message of messages) {
+      if (!params.targetGroupIds.has(message.threadId)) {
+        continue;
+      }
+      processed += 1;
+      await persistMessage(
+        toDbRecordFromRecentMessage({
+          profile: params.profile,
+          message,
+          source: "sync_group",
+          selfId: params.selfId,
+          title: params.titleById.get(message.threadId),
+        }),
+      );
+    }
+  };
+
+  const beforeCount = await getStoredGroupMessageCount();
+  let processed = 0;
+  let completeness = "complete";
+  let stopReason = "exhausted";
+  let pagesRequested = 0;
+  let listenerImportedCount = 0;
+
+  try {
+    params.progress?.(`syncing full history for ${params.targetGroupIds.size} group(s)`);
+    const result = await crawlGroupHistoryViaListener(params.api, {
+      maxPages: Number.MAX_SAFE_INTEGER,
+      idleTimeoutMs: 15_000,
+      onMessages: persistMessages,
+      onPage: ({ pagesRequested, filteredCount }) => {
+        params.progress?.(
+          `groups page ${pagesRequested}: batch ${filteredCount}, processed ${processed}`,
+        );
+      },
+    });
+    completeness =
+      result.stopReason === "exhausted"
+        ? "complete"
+        : result.stopReason === "max_pages" || result.stopReason === "timeout"
+          ? "partial"
+          : "window";
+    stopReason = result.stopReason;
+    pagesRequested = result.pagesRequested;
+    listenerImportedCount = (await getStoredGroupMessageCount()) - beforeCount;
+  } catch (error) {
+    stopReason = `fallback_window:${toErrorText(error)}`;
+    completeness = "window";
+  }
+
+  const fallbackCount = 200;
+  params.progress?.(`merging recent group API window (${fallbackCount} per group)`);
+  const beforeApiCount = await getStoredGroupMessageCount();
+  for (const groupId of params.targetGroupIds) {
+    const messages = await fetchRecentGroupMessagesViaApi(params.api, groupId, fallbackCount);
+    await persistMessages(messages);
+    params.progress?.(`group ${groupId}: fetched ${messages.length} message(s) from group history API`);
+  }
+  const afterCount = await getStoredGroupMessageCount();
+  const apiAddedCount = afterCount - beforeApiCount;
+  if (apiAddedCount > 0) {
+    completeness = "window";
+    if (stopReason === "exhausted" && listenerImportedCount === 0) {
+      stopReason = "fallback_window:empty_listener_result";
+    } else if (stopReason === "exhausted") {
+      stopReason = "window_topoff:listener_incomplete";
+    }
+  }
+  const imported = Math.max(afterCount - beforeCount, 0);
+
+  for (const groupId of params.targetGroupIds) {
+    await setSyncState({
+      profile: params.profile,
+      scopeThreadId: groupId,
+      threadType: "group",
+      status: "synced",
+      completeness,
+    });
+  }
+
+  params.summary.groupsSynced += params.targetGroupIds.size;
+  params.summary.groupMessagesImported += imported;
+  params.summary.syncState.push({
+    kind: "groups",
+    groups: params.targetGroupIds.size,
+    imported,
+    completeness,
+    stopReason,
+    pagesRequested,
+  });
+}
+
+async function syncDbFriendDirectory(params: {
+  profile: string;
+  api: API;
+  summary: DbSyncSummary;
+  progress?: SyncProgressReporter;
+}): Promise<Map<string, string>> {
+  params.progress?.("syncing friend directory");
+  const names = await persistFriendDirectory(params.profile, params.api);
+  params.summary.friendsSynced += names.size;
+  params.progress?.(`friend directory synced: ${names.size} friend(s)`);
+  params.summary.syncState.push({
+    kind: "friends",
+    imported: names.size,
+  });
+  return names;
+}
+
+async function syncDbChatThread(params: {
+  profile: string;
+  api: API;
+  selfId: string;
+  threadId: string;
+  count: number;
+  title?: string;
+  pinnedIds: Set<string>;
+  hiddenIds: Set<string>;
+  summary: DbSyncSummary;
+  progress?: SyncProgressReporter;
+}): Promise<void> {
+  const scopeThreadId = resolveScopeThreadId({
+    threadType: "user",
+    rawThreadId: params.threadId,
+    senderId: params.selfId,
+    toId: params.threadId,
+    selfId: params.selfId,
+  });
+
+  await persistThread({
+    profile: params.profile,
+    scopeThreadId,
+    rawThreadId: params.threadId,
+    threadType: "user",
+    peerId: scopeThreadId,
+    title: params.title,
+    isPinned: params.pinnedIds.has(params.threadId) || params.pinnedIds.has(scopeThreadId),
+    isHidden: params.hiddenIds.has(params.threadId) || params.hiddenIds.has(scopeThreadId),
+  });
+
+  const messages = await fetchRecentUserMessagesViaListener(params.api, params.threadId, params.count);
+  for (const message of messages) {
+    await persistMessage(
+      toDbRecordFromRecentMessage({
+        profile: params.profile,
+        message,
+        source: "sync_dm_best_effort",
+        selfId: params.selfId,
+        title: params.title,
+      }),
+    );
+  }
+
+  await setSyncState({
+    profile: params.profile,
+    scopeThreadId,
+    threadType: "user",
+    status: "synced",
+    completeness: "best_effort",
+  });
+
+  params.summary.chatsSynced += 1;
+  params.summary.dmMessagesImported += messages.length;
+  params.progress?.(`chat ${scopeThreadId}: imported ${messages.length} message(s)`);
+  params.summary.syncState.push({
+    kind: "chat",
+    chatId: scopeThreadId,
+    rawThreadId: params.threadId,
+    imported: messages.length,
+    completeness: "best_effort",
+  });
+}
+
+async function syncDbChatsBestEffort(params: {
+  profile: string;
+  api: API;
+  selfId: string;
+  count: number;
+  titleById: Map<string, string>;
+  pinnedIds: Set<string>;
+  hiddenIds: Set<string>;
+  summary: DbSyncSummary;
+  progress?: SyncProgressReporter;
+}): Promise<void> {
+  const scanLimit = Math.max(params.count * 10, 500);
+  params.progress?.(`scanning recent DM/chat windows (target window ${params.count}, scan limit ${scanLimit})`);
+  const messages = await fetchRecentUserMessagesAcrossThreads(params.api, scanLimit);
+  const seenScopes = new Set<string>();
+
+  for (const message of messages) {
+    const title = params.titleById.get(message.threadId);
+    const record = toDbRecordFromRecentMessage({
+      profile: params.profile,
+      message,
+      source: "sync_dm_best_effort",
+      selfId: params.selfId,
+      title,
+    });
+
+    await persistThread({
+      profile: params.profile,
+      scopeThreadId: record.scopeThreadId,
+      rawThreadId: record.rawThreadId,
+      threadType: "user",
+      peerId: record.scopeThreadId,
+      title,
+      isPinned:
+        params.pinnedIds.has(record.rawThreadId) || params.pinnedIds.has(record.scopeThreadId),
+      isHidden:
+        params.hiddenIds.has(record.rawThreadId) || params.hiddenIds.has(record.scopeThreadId),
+    });
+    await persistMessage(record);
+
+    if (!seenScopes.has(record.scopeThreadId)) {
+      seenScopes.add(record.scopeThreadId);
+      await setSyncState({
+        profile: params.profile,
+        scopeThreadId: record.scopeThreadId,
+        threadType: "user",
+        status: "synced",
+        completeness: "best_effort",
+      });
+    }
+  }
+
+  params.summary.chatsSynced += seenScopes.size;
+  params.summary.dmMessagesImported += messages.length;
+  params.progress?.(`chat scan finished: ${messages.length} message(s) across ${seenScopes.size} chat(s)`);
+  params.summary.syncState.push({
+    kind: "chats",
+    imported: messages.length,
+    chats: seenScopes.size,
+    completeness: "best_effort",
+  });
+}
+
+async function runDbSync(params: {
+  command: Command;
+  mode: "all" | "groups" | "friends" | "chats" | "group" | "chat";
+  count: number;
+  groupId?: string;
+  threadId?: string;
+  progress?: SyncProgressReporter;
+}): Promise<DbSyncSummary> {
+  const { profile, api } = await requireApi(params.command);
+  const dbPath = await resolveDbPath(profile);
+  params.progress?.(`starting sync for profile ${profile}`);
+  const summary = createDbSyncSummary(
+    profile,
+    dbPath,
+    params.mode === "all" || params.mode === "chats" || params.mode === "chat" ? params.count : undefined,
+  );
+  const selfId = api.getOwnId();
+  const selfInfo = normalizeMeInfoOutput(await api.fetchAccountInfo());
+  await persistSelfProfile({
+    profile,
+    userId: selfId,
+    displayName:
+      typeof selfInfo.displayName === "string" && selfInfo.displayName.trim()
+        ? selfInfo.displayName.trim()
+        : undefined,
+    infoJson: JSON.stringify(selfInfo),
+  });
+  const { pinnedIds, hiddenIds } = await collectConversationIds(api);
+
+  let friendNames = new Map<string, string>();
+
+  if (params.mode === "all" || params.mode === "friends" || params.mode === "chats") {
+    friendNames = await syncDbFriendDirectory({
+      profile,
+      api,
+      summary,
+      progress: params.progress,
+    });
+  }
+
+  if (params.mode === "all" || params.mode === "groups") {
+    const groups = await buildGroupsDetailed(api);
+    const targetGroupIds = new Set<string>();
+    const titleById = new Map<string, string | undefined>();
+    for (const group of groups) {
+      const record = group as Record<string, unknown>;
+      const groupId = normalizeCachedId(record.groupId);
+      if (!groupId) continue;
+      const title =
+        typeof record.name === "string" && record.name.trim()
+          ? record.name.trim()
+        : typeof record.groupName === "string" && record.groupName.trim()
+            ? record.groupName.trim()
+            : undefined;
+      targetGroupIds.add(groupId);
+      titleById.set(groupId, title);
+      await prepareDbGroupTarget({
+        profile,
+        api,
+        groupId,
+        title,
+        rawJson: JSON.stringify(group),
+        pinnedIds,
+        hiddenIds,
+      });
+    }
+    await syncDbGroupHistoryFull({
+      profile,
+      api,
+      selfId,
+      targetGroupIds,
+      titleById,
+      summary,
+      progress: params.progress,
+    });
+  }
+
+  if (params.mode === "group") {
+    if (!params.groupId) {
+      throw new Error("Missing group id for db sync group.");
+    }
+    const groupInfo = await api.getGroupInfo(params.groupId);
+    const group = groupInfo.gridInfoMap[params.groupId] as Record<string, unknown> | undefined;
+    const title =
+      typeof group?.name === "string" && group.name.trim()
+        ? group.name.trim()
+        : undefined;
+    await prepareDbGroupTarget({
+      profile,
+      api,
+      groupId: params.groupId,
+      title,
+      rawJson: group ? JSON.stringify(group) : undefined,
+      pinnedIds,
+      hiddenIds,
+    });
+    await syncDbGroupHistoryFull({
+      profile,
+      api,
+      selfId,
+      targetGroupIds: new Set([params.groupId]),
+      titleById: new Map([[params.groupId, title]]),
+      summary,
+      progress: params.progress,
+    });
+  }
+
+  if (params.mode === "chat") {
+    if (!params.threadId) {
+      throw new Error("Missing chat id for db sync chat.");
+    }
+    if (friendNames.size === 0) {
+      friendNames = await persistFriendDirectory(profile, api);
+    }
+    await syncDbChatThread({
+      profile,
+      api,
+      selfId,
+      threadId: params.threadId,
+      count: params.count,
+      title: friendNames.get(params.threadId),
+      pinnedIds,
+      hiddenIds,
+      summary,
+      progress: params.progress,
+    });
+  }
+
+  if (params.mode === "all" || params.mode === "chats") {
+    if (friendNames.size === 0) {
+      friendNames = await persistFriendDirectory(profile, api);
+    }
+    await syncDbChatsBestEffort({
+      profile,
+      api,
+      selfId,
+      count: params.count,
+      titleById: friendNames,
+      pinnedIds,
+      hiddenIds,
+      summary,
+      progress: params.progress,
+    });
+  }
+
+  params.progress?.(
+    `done: groups=${summary.groupsSynced}, groupMessages=${summary.groupMessagesImported}, friends=${summary.friendsSynced}, chats=${summary.chatsSynced}, dmMessages=${summary.dmMessagesImported}`,
+  );
+
+  return summary;
+}
+
 async function buildGroupsDetailed(api: API): Promise<any[]> {
   const groups = await api.getAllGroups();
   const ids = Object.keys(groups.gridVerMap ?? {});
@@ -1477,6 +2353,12 @@ function getRecentPageCursors(messages: RecentThreadMessage[]): string[] {
   return cursors;
 }
 
+type GroupHistoryCrawlResult = {
+  messages: RecentThreadMessage[];
+  stopReason: "limit" | "exhausted" | "max_pages" | "timeout" | "closed";
+  pagesRequested: number;
+};
+
 function normalizeGroupHistoryMessages(
   messages: unknown[],
   fallbackThreadId: string,
@@ -1593,18 +2475,41 @@ async function fetchRecentGroupMessagesViaListener(
   threadId: string,
   count: number,
 ): Promise<RecentThreadMessage[]> {
+  const result = await crawlGroupHistoryViaListener(api, {
+    threadId,
+    limit: count,
+    maxPages: parsePositiveIntFromEnv("OPENZCA_RECENT_GROUP_MAX_PAGES", 20),
+    idleTimeoutMs: 12_000,
+  });
+  return result.messages;
+}
+
+async function crawlGroupHistoryViaListener(
+  api: API,
+  options: {
+    threadId?: string;
+    limit?: number;
+    maxPages: number;
+    idleTimeoutMs: number;
+    onMessages?: (messages: RecentThreadMessage[]) => Promise<void> | void;
+    onPage?: (info: { pagesRequested: number; filteredCount: number; collectedCount: number }) => Promise<void> | void;
+  },
+): Promise<GroupHistoryCrawlResult> {
   return new Promise((resolve, reject) => {
     let settled = false;
+    let stopReason: GroupHistoryCrawlResult["stopReason"] = "closed";
+    const shouldCollect = options.limit != null || !options.onMessages;
     const collected: RecentThreadMessage[] = [];
     const seenMessageKeys = new Set<string>();
     const requestedCursors = new Set<string>();
-    const maxPages = parsePositiveIntFromEnv("OPENZCA_RECENT_GROUP_MAX_PAGES", 20);
     let pagesRequested = 0;
+    let idleTimer: NodeJS.Timeout | undefined;
+    let processing = Promise.resolve();
 
     const toKey = (message: RecentThreadMessage): string => {
       const msgId = String(message.data?.msgId ?? "");
       const cliMsgId = String(message.data?.cliMsgId ?? "");
-      return `${msgId}:${cliMsgId}`;
+      return `${message.threadId}:${msgId}:${cliMsgId}`;
     };
 
     const requestPage = (lastId: string | null) => {
@@ -1618,8 +2523,19 @@ async function fetchRecentGroupMessagesViaListener(
       return true;
     };
 
+    const armIdleTimer = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      idleTimer = setTimeout(() => {
+        finish(undefined, "timeout");
+      }, options.idleTimeoutMs);
+    };
+
     const cleanup = () => {
-      clearTimeout(timeoutId);
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
       api.listener.off("connected", onConnected);
       api.listener.off("old_messages", onOldMessages);
       api.listener.off("error", onError);
@@ -1632,80 +2548,114 @@ async function fetchRecentGroupMessagesViaListener(
       }
     };
 
-    const finish = (error?: unknown) => {
+    const finish = (error?: unknown, reason?: GroupHistoryCrawlResult["stopReason"]) => {
       if (settled) return;
       settled = true;
-      cleanup();
-      if (error) {
-        reject(error);
-        return;
+      if (reason) {
+        stopReason = reason;
       }
-      resolve(sortRecentMessagesNewestFirst(collected).slice(0, count));
+      void processing
+        .then(() => {
+          cleanup();
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve({
+            messages:
+              options.limit != null
+                ? sortRecentMessagesNewestFirst(collected).slice(0, options.limit)
+                : collected,
+            stopReason,
+            pagesRequested,
+          });
+        })
+        .catch((processingError) => {
+          cleanup();
+          reject(processingError);
+        });
     };
 
     const onConnected = () => {
       try {
+        armIdleTimer();
         requestPage(null);
       } catch (error) {
-        finish(error);
+        finish(error, "closed");
       }
     };
 
     const onOldMessages = (messages: unknown[], type: ThreadType) => {
       if (type !== ThreadType.Group) return;
-
+      armIdleTimer();
       const typedMessages = messages as RecentThreadMessage[];
 
-      for (const message of typedMessages) {
-        if (message.threadId === threadId) {
-          const key = toKey(message);
-          if (seenMessageKeys.has(key)) continue;
-          seenMessageKeys.add(key);
-          collected.push(message);
-        }
-      }
+      processing = processing
+        .then(async () => {
+          const filtered: RecentThreadMessage[] = [];
 
-      if (collected.length >= count) {
-        finish();
-        return;
-      }
-
-      if (typedMessages.length === 0) {
-        finish();
-        return;
-      }
-
-      if (pagesRequested >= maxPages) {
-        finish();
-        return;
-      }
-
-      try {
-        const cursorCandidates = getRecentPageCursors(typedMessages);
-        let requested = false;
-        for (const cursor of cursorCandidates) {
-          if (requestPage(cursor)) {
-            requested = true;
-            break;
+          for (const message of typedMessages) {
+            if (options.threadId && message.threadId !== options.threadId) {
+              continue;
+            }
+            const key = toKey(message);
+            if (seenMessageKeys.has(key)) continue;
+            seenMessageKeys.add(key);
+            if (shouldCollect) {
+              collected.push(message);
+            }
+            filtered.push(message);
           }
-        }
-        if (!requested) finish();
-      } catch (error) {
-        finish(error);
-      }
+
+          if (filtered.length > 0) {
+            await options.onMessages?.(filtered);
+          }
+
+          await options.onPage?.({
+            pagesRequested,
+            filteredCount: filtered.length,
+            collectedCount: collected.length,
+          });
+
+          if (options.limit != null && collected.length >= options.limit) {
+            finish(undefined, "limit");
+            return;
+          }
+
+          if (typedMessages.length === 0) {
+            finish(undefined, "exhausted");
+            return;
+          }
+
+          if (pagesRequested >= options.maxPages) {
+            finish(undefined, "max_pages");
+            return;
+          }
+
+          const cursorCandidates = getRecentPageCursors(typedMessages);
+          let requested = false;
+          for (const cursor of cursorCandidates) {
+            if (requestPage(cursor)) {
+              requested = true;
+              break;
+            }
+          }
+          if (!requested) {
+            finish(undefined, "exhausted");
+          }
+        })
+        .catch((error) => {
+          finish(error, "closed");
+        });
     };
 
     const onError = (error: unknown) => {
-      finish(error);
+      finish(error, "closed");
     };
 
     const onClosed = () => {
-      finish();
+      finish(undefined, "closed");
     };
-
-    const timeoutId = setTimeout(() => {
-      finish();
-    }, 12_000);
 
     api.listener.on("connected", onConnected);
     api.listener.on("old_messages", onOldMessages);
@@ -1849,6 +2799,207 @@ async function fetchRecentUserMessagesViaListener(
     } catch (error) {
       finish(error);
     }
+  });
+}
+
+async function fetchRecentUserMessagesAcrossThreads(
+  api: API,
+  maxMessages: number,
+): Promise<RecentThreadMessage[]> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const collected: RecentThreadMessage[] = [];
+    const seenMessageKeys = new Set<string>();
+    const requestedCursors = new Set<string>();
+    const maxPages = parsePositiveIntFromEnv("OPENZCA_RECENT_USER_MAX_PAGES", 20);
+    let pagesRequested = 0;
+
+    const toKey = (message: RecentThreadMessage): string => {
+      const msgId = String(message.data?.msgId ?? "");
+      const cliMsgId = String(message.data?.cliMsgId ?? "");
+      return `${message.threadId}:${msgId}:${cliMsgId}`;
+    };
+
+    const requestPage = (lastId: string | null) => {
+      const cursor = String(lastId ?? "").trim();
+      if (cursor) {
+        if (requestedCursors.has(cursor)) return false;
+        requestedCursors.add(cursor);
+      }
+      pagesRequested += 1;
+      api.listener.requestOldMessages(ThreadType.User, cursor || null);
+      return true;
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      api.listener.off("connected", onConnected);
+      api.listener.off("old_messages", onOldMessages);
+      api.listener.off("error", onError);
+      api.listener.off("closed", onClosed);
+
+      try {
+        api.listener.stop();
+      } catch {
+        // ignore
+      }
+    };
+
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(sortRecentMessagesNewestFirst(collected).slice(0, maxMessages));
+    };
+
+    const onConnected = () => {
+      try {
+        requestPage(null);
+      } catch (error) {
+        finish(error);
+      }
+    };
+
+    const onOldMessages = (messages: unknown[], type: ThreadType) => {
+      if (type !== ThreadType.User) return;
+      const typedMessages = messages as RecentThreadMessage[];
+
+      for (const message of typedMessages) {
+        const key = toKey(message);
+        if (seenMessageKeys.has(key)) continue;
+        seenMessageKeys.add(key);
+        collected.push(message);
+      }
+
+      if (collected.length >= maxMessages || typedMessages.length === 0 || pagesRequested >= maxPages) {
+        finish();
+        return;
+      }
+
+      try {
+        const cursorCandidates = getRecentPageCursors(typedMessages);
+        let requested = false;
+        for (const cursor of cursorCandidates) {
+          if (requestPage(cursor)) {
+            requested = true;
+            break;
+          }
+        }
+        if (!requested) finish();
+      } catch (error) {
+        finish(error);
+      }
+    };
+
+    const onError = (error: unknown) => {
+      finish(error);
+    };
+
+    const onClosed = () => {
+      finish();
+    };
+
+    const timeoutId = setTimeout(() => {
+      finish();
+    }, 12_000);
+
+    api.listener.on("connected", onConnected);
+    api.listener.on("old_messages", onOldMessages);
+    api.listener.on("error", onError);
+    api.listener.on("closed", onClosed);
+
+    try {
+      api.listener.start();
+    } catch (error) {
+      finish(error);
+    }
+  });
+}
+
+function normalizeRecentMessageMentions(value: unknown): DbMention[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const rows: DbMention[] = [];
+  const parseOptionalMentionInt = (input: unknown): number | undefined => {
+    if (typeof input === "number" && Number.isFinite(input)) {
+      return Math.trunc(input);
+    }
+    if (typeof input === "string" && input.trim()) {
+      const parsed = Number(input.trim());
+      if (Number.isFinite(parsed)) {
+        return Math.trunc(parsed);
+      }
+    }
+    return undefined;
+  };
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const uid = normalizeCachedId(record.uid);
+    if (!uid) continue;
+    rows.push({
+      uid,
+      pos: parseOptionalMentionInt(record.pos),
+      len: parseOptionalMentionInt(record.len),
+      type:
+        typeof record.type === "number" && Number.isFinite(record.type)
+          ? Math.trunc(record.type)
+          : typeof record.type === "string" && record.type.trim()
+            ? Number.parseInt(record.type.trim(), 10)
+            : undefined,
+      rawJson: JSON.stringify(record),
+    });
+  }
+  return rows;
+}
+
+function toDbRecordFromRecentMessage(params: {
+  profile: string;
+  message: RecentThreadMessage;
+  source: string;
+  selfId?: string;
+  title?: string;
+}): ReturnType<typeof normalizeInboundListenRecord> {
+  const content = params.message.data?.content;
+  const quote = (params.message.data as {
+    quote?: {
+      globalMsgId?: string | number;
+      cliMsgId?: string | number;
+      ownerId?: string | number;
+      msg?: string;
+    };
+  } | undefined)?.quote;
+  return normalizeInboundListenRecord({
+    profile: params.profile,
+    threadType: params.message.type === ThreadType.Group ? "group" : "user",
+    rawThreadId: params.message.threadId,
+    senderId: params.message.data?.uidFrom,
+    senderName: params.message.data?.dName,
+    toId: (params.message.data as { idTo?: string } | undefined)?.idTo,
+    selfId: params.selfId,
+    title: params.title,
+    msgId: params.message.data?.msgId,
+    cliMsgId: params.message.data?.cliMsgId,
+    actionId: params.message.data?.actionId,
+    timestampMs: toEpochMs(params.message.data?.ts),
+    msgType: params.message.data?.msgType,
+    contentText: typeof content === "string" ? content : undefined,
+    contentJson:
+      content && typeof content === "object" ? JSON.stringify(content) : undefined,
+    quoteMsgId: quote?.globalMsgId != null ? String(quote.globalMsgId) : undefined,
+    quoteCliMsgId: quote?.cliMsgId != null ? String(quote.cliMsgId) : undefined,
+    quoteOwnerId: quote?.ownerId != null ? String(quote.ownerId) : undefined,
+    quoteText: typeof quote?.msg === "string" ? quote.msg : undefined,
+    mentions: normalizeRecentMessageMentions(
+      (params.message.data as { mentions?: unknown } | undefined)?.mentions,
+    ),
+    rawMessage: params.message.data,
+    source: params.source,
   });
 }
 
@@ -2827,11 +3978,39 @@ function toEpochSeconds(input: unknown): number {
   return Math.floor(numeric);
 }
 
+function toEpochMs(input: unknown): number {
+  const numeric =
+    typeof input === "number"
+      ? input
+      : typeof input === "string"
+        ? Number(input)
+        : Number.NaN;
+
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return Date.now();
+  }
+
+  if (numeric < 10_000_000_000) {
+    return Math.floor(numeric * 1000);
+  }
+
+  return Math.floor(numeric);
+}
+
 function parseNonNegativeIntOption(label: string, value?: string): number | undefined {
   if (!value || !value.trim()) return undefined;
   const parsed = Number(value.trim());
   if (!Number.isFinite(parsed) || parsed < 0) {
     throw new Error(`${label} must be a non-negative number.`);
+  }
+  return Math.trunc(parsed);
+}
+
+function parsePositiveIntOption(label: string, value?: string): number | undefined {
+  if (!value || !value.trim()) return undefined;
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive number.`);
   }
   return Math.trunc(parsed);
 }
@@ -3115,6 +4294,614 @@ auth
     }),
   );
 
+const dbCmd = program.command("db").description("Profile-scoped SQLite message database");
+
+dbCmd
+  .command("enable")
+  .option("--path <path>", "Custom SQLite file path")
+  .description("Enable local SQLite persistence for the active profile")
+  .action(
+    wrapAction(async (opts: { path?: string }, command: Command) => {
+      const profile = await currentProfile(command);
+      await enableDb(profile, opts.path);
+      output(await getDbStatus(profile), false);
+    }),
+  );
+
+dbCmd
+  .command("disable")
+  .description("Disable automatic SQLite persistence for the active profile")
+  .action(
+    wrapAction(async (command: Command) => {
+      const profile = await currentProfile(command);
+      await disableDb(profile);
+      await closeDb(profile);
+      output(await getDbStatus(profile), false);
+    }),
+  );
+
+dbCmd
+  .command("reset")
+  .option("-y, --yes", "Delete the SQLite DB file for the active profile")
+  .option("--drop-config", "Also remove the DB config file")
+  .option("-j, --json", "JSON output")
+  .description("Delete the local SQLite DB for the active profile")
+  .action(
+    wrapAction(async (
+      opts: { yes?: boolean; dropConfig?: boolean; json?: boolean },
+      command: Command,
+    ) => {
+      if (!opts.yes) {
+        const confirmed = await confirmDestructiveAction(
+          "Reset the local SQLite DB for the active profile?",
+        );
+        if (!confirmed) {
+          console.log("Cancelled.");
+          return;
+        }
+      }
+      const profile = await currentProfile(command);
+      const dbPath = await resolveDbPath(profile);
+      const configPath = getDbConfigPath(profile);
+      await closeDb(profile);
+
+      const removedPaths: string[] = [];
+      const deleteIfExists = async (filename: string) => {
+        try {
+          await fs.unlink(filename);
+          removedPaths.push(filename);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw error;
+          }
+        }
+      };
+
+      await deleteIfExists(dbPath);
+      await deleteIfExists(`${dbPath}-wal`);
+      await deleteIfExists(`${dbPath}-shm`);
+
+      if (opts.dropConfig) {
+        await deleteIfExists(configPath);
+      }
+
+      const status = await getDbStatus(profile);
+      output(
+        {
+          profile,
+          removedPaths,
+          droppedConfig: Boolean(opts.dropConfig),
+          status: {
+            enabled: status.enabled,
+            path: status.path,
+            exists: status.exists,
+            messageCount: status.messageCount,
+            threadCount: status.threadCount,
+            groupCount: status.groupCount,
+            userCount: status.userCount,
+          },
+        },
+        Boolean(opts.json),
+      );
+    }),
+  );
+
+dbCmd
+  .command("status")
+  .option("-j, --json", "JSON output")
+  .description("Show DB status for the active profile")
+  .action(
+    wrapAction(async (opts: { json?: boolean }, command: Command) => {
+      const profile = await currentProfile(command);
+      const config = await readDbConfig(profile);
+      const status = await getDbStatus(profile);
+      const syncRows = await listSyncState({ profile });
+      output(
+        {
+          profile,
+          enabled: status.enabled,
+          path: await resolveDbPath(profile),
+          exists: status.exists,
+          configuredPath: config.path ?? null,
+          messageCount: status.messageCount,
+          threadCount: status.threadCount,
+          groupCount: status.groupCount,
+          userCount: status.userCount,
+          syncStates: {
+            total: syncRows.length,
+            synced: syncRows.filter((row) => row.status === "synced").length,
+            errors: syncRows.filter((row) => row.status === "error").length,
+          },
+          lastMessageAtMs: status.lastMessageAtMs ?? null,
+          updatedAt: status.updatedAt ?? null,
+        },
+        Boolean(opts.json),
+      );
+    }),
+  );
+
+const dbMe = dbCmd.command("me").description("Query stored self profile data");
+
+dbMe
+  .command("info")
+  .option("-j, --json", "JSON output")
+  .description("Show stored self profile info")
+  .action(
+    wrapAction(async (opts: { json?: boolean }, command: Command) => {
+      const profile = await currentProfile(command);
+      const row = await getSelfProfile(profile);
+      if (!row?.info) {
+        throw new Error("No stored self profile in DB. Run `openzca db sync` first.");
+      }
+      output(row.info, Boolean(opts.json));
+    }),
+  );
+
+dbMe
+  .command("id")
+  .description("Show stored self user ID")
+  .action(
+    wrapAction(async (command: Command) => {
+      const profile = await currentProfile(command);
+      const row = await getSelfProfile(profile);
+      if (!row?.userId) {
+        throw new Error("No stored self profile in DB. Run `openzca db sync` first.");
+      }
+      console.log(row.userId);
+    }),
+  );
+
+const dbGroup = dbCmd.command("group").description("Query stored group data");
+
+dbGroup
+  .command("list")
+  .option("-j, --json", "JSON output")
+  .description("List groups stored in the local DB")
+  .action(
+    wrapAction(async (opts: { json?: boolean }, command: Command) => {
+      const profile = await currentProfile(command);
+      output(await listGroups(profile), Boolean(opts.json));
+    }),
+  );
+
+dbGroup
+  .command("info <groupId>")
+  .option("-j, --json", "JSON output")
+  .description("Show stored info for a group")
+  .action(
+    wrapAction(async (groupId: string, opts: { json?: boolean }, command: Command) => {
+      const profile = await currentProfile(command);
+      const row = await getThreadInfo({ profile, threadId: groupId, threadType: "group" });
+      if (!row) {
+        throw new Error(`Group not found in DB: ${groupId}`);
+      }
+      output(row, Boolean(opts.json));
+    }),
+  );
+
+dbGroup
+  .command("members <groupId>")
+  .option("-j, --json", "JSON output")
+  .description("List stored members for a group")
+  .action(
+    wrapAction(async (groupId: string, opts: { json?: boolean }, command: Command) => {
+      const profile = await currentProfile(command);
+      output(await listThreadMembers({ profile, threadId: groupId }), Boolean(opts.json));
+    }),
+  );
+
+dbGroup
+  .command("messages <groupId>")
+  .option("--since <duration>", "Rolling window ending now: duration like 30s, 7m, 24h, 7d, or 2w")
+  .option("--from <time>", "Lower time bound: ISO timestamp, date, or unix seconds/ms")
+  .option("--until <time>", "Upper time bound: ISO timestamp, date, or unix seconds/ms")
+  .option("--to <time>", "Alias for --until")
+  .option("--limit <count>", "Maximum number of rows")
+  .option("--all", "Return all matching rows")
+  .option("--oldest-first", "Sort oldest-first instead of newest-first")
+  .option("-j, --json", "JSON output")
+  .description("List stored messages for a group")
+  .action(
+    wrapAction(async (
+      groupId: string,
+      opts: {
+        since?: string;
+        from?: string;
+        until?: string;
+        to?: string;
+        limit?: string;
+        all?: boolean;
+        oldestFirst?: boolean;
+        json?: boolean;
+      },
+      command: Command,
+    ) => {
+      const profile = await currentProfile(command);
+      const { sinceMs, untilMs, limit, newestFirst } = resolveMessageQueryOptions(opts);
+      const rows = await listMessages({
+        profile,
+        threadId: groupId,
+        threadType: "group",
+        sinceMs,
+        untilMs,
+        limit,
+        newestFirst,
+      });
+      output(
+        {
+          groupId,
+          count: rows.length,
+          messages: rows,
+        },
+        Boolean(opts.json),
+      );
+    }),
+  );
+
+const dbFriend = dbCmd.command("friend").description("Query stored friend directory data");
+
+dbFriend
+  .command("list")
+  .option("-j, --json", "JSON output")
+  .description("List friends stored in the local DB")
+  .action(
+    wrapAction(async (opts: { json?: boolean }, command: Command) => {
+      const profile = await currentProfile(command);
+      output(await listFriends(profile), Boolean(opts.json));
+    }),
+  );
+
+dbFriend
+  .command("find <query>")
+  .option("-j, --json", "JSON output")
+  .description("Find stored friends by ID or name")
+  .action(
+    wrapAction(async (query: string, opts: { json?: boolean }, command: Command) => {
+      const profile = await currentProfile(command);
+      output(await findFriends({ profile, query }), Boolean(opts.json));
+    }),
+  );
+
+dbFriend
+  .command("info <userId>")
+  .option("-j, --json", "JSON output")
+  .description("Show stored info for a friend")
+  .action(
+    wrapAction(async (userId: string, opts: { json?: boolean }, command: Command) => {
+      const profile = await currentProfile(command);
+      const row = await getFriendInfo({ profile, userId });
+      if (!row) {
+        throw new Error(`Friend not found in DB: ${userId}`);
+      }
+      output(row, Boolean(opts.json));
+    }),
+  );
+
+dbFriend
+  .command("messages <userId>")
+  .option("--since <duration>", "Rolling window ending now: duration like 30s, 7m, 24h, 7d, or 2w")
+  .option("--from <time>", "Lower time bound: ISO timestamp, date, or unix seconds/ms")
+  .option("--until <time>", "Upper time bound: ISO timestamp, date, or unix seconds/ms")
+  .option("--to <time>", "Alias for --until")
+  .option("--limit <count>", "Maximum number of rows")
+  .option("--all", "Return all matching rows")
+  .option("--oldest-first", "Sort oldest-first instead of newest-first")
+  .option("-j, --json", "JSON output")
+  .description("List stored direct-message rows for a friend")
+  .action(
+    wrapAction(async (
+      userId: string,
+      opts: {
+        since?: string;
+        from?: string;
+        until?: string;
+        to?: string;
+        limit?: string;
+        all?: boolean;
+        oldestFirst?: boolean;
+        json?: boolean;
+      },
+      command: Command,
+    ) => {
+      const profile = await currentProfile(command);
+      const { sinceMs, untilMs, limit, newestFirst } = resolveMessageQueryOptions(opts);
+      const rows = await listMessages({
+        profile,
+        threadId: userId,
+        threadType: "user",
+        sinceMs,
+        untilMs,
+        limit,
+        newestFirst,
+      });
+      output(
+        {
+          userId,
+          count: rows.length,
+          messages: rows,
+        },
+        Boolean(opts.json),
+      );
+    }),
+  );
+
+const dbChat = dbCmd
+  .command("chat")
+  .argument("[chatId]")
+  .option("-g, --group", "Read as a group chat")
+  .option("--since <duration>", "Rolling window ending now: duration like 30s, 7m, 24h, 7d, or 2w")
+  .option("--from <time>", "Lower time bound: ISO timestamp, date, or unix seconds/ms")
+  .option("--until <time>", "Upper time bound: ISO timestamp, date, or unix seconds/ms")
+  .option("--to <time>", "Alias for --until")
+  .option("--limit <count>", "Maximum number of rows")
+  .option("--all", "Return all matching rows")
+  .option("--oldest-first", "Sort oldest-first instead of newest-first")
+  .option("-j, --json", "JSON output")
+  .description("Query stored conversation data")
+  .action(
+    wrapAction(async (
+      chatId: string | undefined,
+      opts: {
+        group?: boolean;
+        since?: string;
+        from?: string;
+        until?: string;
+        to?: string;
+        limit?: string;
+        all?: boolean;
+        oldestFirst?: boolean;
+        json?: boolean;
+      },
+      command: Command,
+    ) => {
+      if (!chatId) {
+        command.help();
+        return;
+      }
+      const profile = await currentProfile(command);
+      const threadType = await resolveStoredChatThreadType(profile, chatId, opts.group);
+      const { sinceMs, untilMs, limit, newestFirst } = resolveMessageQueryOptions(opts);
+      const rows = await listMessages({
+        profile,
+        threadId: chatId,
+        threadType,
+        sinceMs,
+        untilMs,
+        limit,
+        newestFirst,
+      });
+      output(
+        {
+          chatId,
+          threadType,
+          count: rows.length,
+          messages: rows,
+        },
+        Boolean(opts.json),
+      );
+    }),
+  );
+
+dbChat
+  .command("list")
+  .option("-j, --json", "JSON output")
+  .description("List chats stored in the local DB")
+  .action(
+    wrapAction(async (opts: { json?: boolean }, command: Command) => {
+      const profile = await currentProfile(command);
+      output(await listChats(profile), Boolean(opts.json));
+    }),
+  );
+
+dbChat
+  .command("info <chatId>")
+  .option("-g, --group", "Read as a group chat")
+  .option("-j, --json", "JSON output")
+  .description("Show stored info for a chat")
+  .action(
+    wrapAction(async (
+      chatId: string,
+      opts: { group?: boolean; json?: boolean },
+      command: Command,
+    ) => {
+      const profile = await currentProfile(command);
+      const row = await getThreadInfo({
+        profile,
+        threadId: chatId,
+        threadType: opts.group ? "group" : undefined,
+      });
+      if (!row) {
+        throw new Error(`Chat not found in DB: ${chatId}`);
+      }
+      output(row, Boolean(opts.json));
+    }),
+  );
+
+dbChat
+  .command("messages <chatId>")
+  .option("-g, --group", "Read as a group chat")
+  .option("--since <duration>", "Rolling window ending now: duration like 30s, 7m, 24h, 7d, or 2w")
+  .option("--from <time>", "Lower time bound: ISO timestamp, date, or unix seconds/ms")
+  .option("--until <time>", "Upper time bound: ISO timestamp, date, or unix seconds/ms")
+  .option("--to <time>", "Alias for --until")
+  .option("--limit <count>", "Maximum number of rows")
+  .option("--all", "Return all matching rows")
+  .option("--oldest-first", "Sort oldest-first instead of newest-first")
+  .option("-j, --json", "JSON output")
+  .description("List stored messages for a chat")
+  .action(
+    wrapAction(async (
+      chatId: string,
+      opts: {
+        group?: boolean;
+        since?: string;
+        from?: string;
+        until?: string;
+        to?: string;
+        limit?: string;
+        all?: boolean;
+        oldestFirst?: boolean;
+        json?: boolean;
+      },
+      command: Command,
+    ) => {
+      const profile = await currentProfile(command);
+      const threadType = await resolveStoredChatThreadType(profile, chatId, opts.group);
+      const { sinceMs, untilMs, limit, newestFirst } = resolveMessageQueryOptions(opts);
+      const rows = await listMessages({
+        profile,
+        threadId: chatId,
+        threadType,
+        sinceMs,
+        untilMs,
+        limit,
+        newestFirst,
+      });
+      output(
+        {
+          chatId,
+          threadType,
+          count: rows.length,
+          messages: rows,
+        },
+        Boolean(opts.json),
+      );
+    }),
+  );
+
+const dbMessage = dbCmd.command("message").description("Query stored messages");
+
+dbMessage
+  .command("get <id>")
+  .option("-j, --json", "JSON output")
+  .description("Read one stored message by msgId, cliMsgId, or internal uid")
+  .action(
+    wrapAction(async (id: string, opts: { json?: boolean }, command: Command) => {
+      const profile = await currentProfile(command);
+      const row = await getMessageById({ profile, id });
+      if (!row) {
+        throw new Error(`Message not found in DB: ${id}`);
+      }
+      output(row, Boolean(opts.json));
+    }),
+  );
+
+const dbSync = dbCmd.command("sync").description("Sync discoverable data into the local DB");
+dbSync.enablePositionalOptions();
+
+dbSync
+  .option("-n, --count <count>", "Recent DM/chat messages to fetch per window", "200")
+  .option("-j, --json", "JSON output")
+  .action(
+    wrapAction(async (opts: { count: string; json?: boolean }, command: Command) => {
+      const count = resolveSyncWindowCount(opts.count);
+      const progress = createSyncProgressReporter();
+      const summary = await runDbSync({
+        command,
+        mode: "all",
+        count,
+        progress,
+      });
+      output(summary, Boolean(opts.json));
+    }),
+  );
+
+dbSync
+  .command("all")
+  .option("-n, --count <count>", "Recent DM/chat messages to fetch per window", "200")
+  .option("-j, --json", "JSON output")
+  .description("Sync full group history, friend directory, and recent DM/chat windows")
+  .action(
+    wrapAction(async (_opts: { count: string; json?: boolean }, command: Command) => {
+      const count = resolveSyncWindowCount(readCliOptionValue(["--count", "-n"]));
+      output(
+        await runDbSync({ command, mode: "all", count, progress: createSyncProgressReporter() }),
+        readCliFlag(["--json", "-j"]),
+      );
+    }),
+  );
+
+dbSync
+  .command("groups")
+  .option("-j, --json", "JSON output")
+  .description("Sync group directory, members, and full group history")
+  .action(
+    wrapAction(async (_opts: { json?: boolean }, command: Command) => {
+      output(
+        await runDbSync({ command, mode: "groups", count: 0, progress: createSyncProgressReporter() }),
+        readCliFlag(["--json", "-j"]),
+      );
+    }),
+  );
+
+dbSync
+  .command("friends")
+  .option("-j, --json", "JSON output")
+  .description("Sync friend directory only")
+  .action(
+    wrapAction(async (_opts: { json?: boolean }, command: Command) => {
+      output(
+        await runDbSync({ command, mode: "friends", count: 0, progress: createSyncProgressReporter() }),
+        readCliFlag(["--json", "-j"]),
+      );
+    }),
+  );
+
+dbSync
+  .command("chats")
+  .option("-n, --count <count>", "Recent messages to fetch per scan/window", "200")
+  .option("-j, --json", "JSON output")
+  .description("Sync discoverable chat windows (DM/chat sync is best-effort)")
+  .action(
+    wrapAction(async (_opts: { count: string; json?: boolean }, command: Command) => {
+      const count = resolveSyncWindowCount(readCliOptionValue(["--count", "-n"]));
+      output(
+        await runDbSync({ command, mode: "chats", count, progress: createSyncProgressReporter() }),
+        readCliFlag(["--json", "-j"]),
+      );
+    }),
+  );
+
+dbSync
+  .command("group <groupId>")
+  .option("-j, --json", "JSON output")
+  .description("Sync one group with full group history")
+  .action(
+    wrapAction(async (groupId: string, _opts: { json?: boolean }, command: Command) => {
+      output(
+        await runDbSync({
+          command,
+          mode: "group",
+          count: 0,
+          groupId,
+          progress: createSyncProgressReporter(),
+        }),
+        readCliFlag(["--json", "-j"]),
+      );
+    }),
+  );
+
+dbSync
+  .command("chat <chatId>")
+  .option("-n, --count <count>", "Recent messages to fetch for this chat", "200")
+  .option("-j, --json", "JSON output")
+  .description("Sync one chat (best-effort for direct-message history)")
+  .action(
+    wrapAction(async (chatId: string, _opts: { count: string; json?: boolean }, command: Command) => {
+      const count = resolveSyncWindowCount(readCliOptionValue(["--count", "-n"]));
+      output(
+        await runDbSync({
+          command,
+          mode: "chat",
+          count,
+          threadId: chatId,
+          progress: createSyncProgressReporter(),
+        }),
+        readCliFlag(["--json", "-j"]),
+      );
+    }),
+  );
+
 const msg = program.command("msg").description("Messaging commands");
 
 msg
@@ -3124,7 +4911,7 @@ msg
   .description("Send text message with formatting (**bold** *italic* __bold__ ~~strike~~ {underline}text{/underline} {red}color{/red} {big}size{/big} lists indents). Group sends also resolve unique @Name/@userId mentions.")
   .action(
     wrapAction(async (threadId: string, message: string, opts: { group?: boolean; raw?: boolean }, command: Command) => {
-      const { api } = await requireApi(command);
+      const { api, profile } = await requireApi(command);
       const threadType = asThreadType(opts.group);
       const payload = await buildTextSendPayload({
         message,
@@ -3135,6 +4922,20 @@ msg
       });
       const response = await api.sendMessage(payload, threadId, threadType);
       output(response, false);
+      if (await shouldWriteToDb(profile)) {
+        scheduleDbWrite(profile, command, "msg.send.db.persist_error", async () => {
+          await persistOutgoingMessageBestEffort({
+            profile,
+            api,
+            threadId,
+            group: opts.group,
+            text: message,
+            msgType: "text",
+            response,
+            rawPayload: payload,
+          });
+        });
+      }
     }),
   );
 
@@ -3152,7 +4953,7 @@ msg
         opts: { url?: string[]; message?: string; group?: boolean },
         command: Command,
       ) => {
-        const { api } = await requireApi(command);
+        const { api, profile } = await requireApi(command);
 
         const normalizedFile = file ? normalizeMediaInput(file) : undefined;
         const files = [normalizedFile, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
@@ -3187,6 +4988,28 @@ msg
           );
 
           output(response, false);
+          if (await shouldWriteToDb(profile)) {
+            scheduleDbWrite(profile, command, "msg.image.db.persist_error", async () => {
+              await persistOutgoingMessageBestEffort({
+                profile,
+                api,
+                threadId,
+                group: opts.group,
+                text: opts.message ?? "",
+                msgType: "image",
+                response,
+                rawPayload: {
+                  msg: opts.message ?? "",
+                  attachments,
+                },
+                media: attachments.map((item) => ({
+                  mediaKind: "image",
+                  mediaPath: isHttpUrl(item) ? undefined : item,
+                  mediaUrl: isHttpUrl(item) ? item : undefined,
+                })),
+              });
+            });
+          }
         } finally {
           await downloaded.cleanup();
         }
@@ -3288,6 +5111,30 @@ msg
                 command,
               );
               output(response, false);
+              if (await shouldWriteToDb(profile)) {
+                scheduleDbWrite(profile, command, "msg.video.db.persist_error", async () => {
+                  await persistOutgoingMessageBestEffort({
+                    profile,
+                    api,
+                    threadId,
+                    group: opts.group,
+                    text: opts.message ?? "",
+                    msgType: "video",
+                    response,
+                    rawPayload: {
+                      msg: opts.message ?? "",
+                      videoPath: attachments[0],
+                      thumbnailPath: thumbnailPath ?? null,
+                    },
+                    media: [
+                      {
+                        mediaKind: "video",
+                        mediaPath: attachments[0],
+                      },
+                    ],
+                  });
+                });
+              }
               return;
             } catch (error) {
               writeDebugLine(
@@ -3326,6 +5173,28 @@ msg
           );
 
           output(response, false);
+          if (await shouldWriteToDb(profile)) {
+            scheduleDbWrite(profile, command, "msg.video.db.persist_error", async () => {
+              await persistOutgoingMessageBestEffort({
+                profile,
+                api,
+                threadId,
+                group: opts.group,
+                text: opts.message ?? "",
+                msgType: "video",
+                response,
+                rawPayload: {
+                  msg: opts.message ?? "",
+                  attachments,
+                },
+                media: attachments.map((item) => ({
+                  mediaKind: "video",
+                  mediaPath: isHttpUrl(item) ? undefined : item,
+                  mediaUrl: isHttpUrl(item) ? item : undefined,
+                })),
+              });
+            });
+          }
         } finally {
           await downloaded.cleanup();
           await downloadedThumbnail.cleanup();
@@ -3347,7 +5216,7 @@ msg
         opts: { url?: string[]; group?: boolean },
         command: Command,
       ) => {
-        const { api } = await requireApi(command);
+        const { api, profile } = await requireApi(command);
         const type = asThreadType(opts.group);
 
         const normalizedFile = file ? normalizeMediaInput(file) : undefined;
@@ -3388,6 +5257,27 @@ msg
           }
 
           output(results, false);
+          if (await shouldWriteToDb(profile)) {
+            scheduleDbWrite(profile, command, "msg.voice.db.persist_error", async () => {
+              await persistOutgoingMessageBestEffort({
+                profile,
+                api,
+                threadId,
+                group: opts.group,
+                msgType: "voice",
+                response: results,
+                rawPayload: uploaded,
+                media: uploaded.map((item) => ({
+                  mediaKind: "voice",
+                  mediaUrl:
+                    "fileUrl" in item && typeof item.fileUrl === "string"
+                      ? item.fileUrl
+                      : undefined,
+                  rawJson: JSON.stringify(item),
+                })),
+              });
+            });
+          }
         } finally {
           await downloaded.cleanup();
         }
@@ -3434,9 +5324,23 @@ msg
   .description("Send link")
   .action(
     wrapAction(async (threadId: string, url: string, opts: { group?: boolean }, command: Command) => {
-      const { api } = await requireApi(command);
+      const { api, profile } = await requireApi(command);
       const response = await api.sendLink({ link: url }, threadId, asThreadType(opts.group));
       output(response, false);
+      if (await shouldWriteToDb(profile)) {
+        scheduleDbWrite(profile, command, "msg.link.db.persist_error", async () => {
+          await persistOutgoingMessageBestEffort({
+            profile,
+            api,
+            threadId,
+            group: opts.group,
+            text: url,
+            msgType: "link",
+            response,
+            rawPayload: { link: url },
+          });
+        });
+      }
     }),
   );
 
@@ -3743,50 +5647,68 @@ msg
 msg
   .command("recent <threadId>")
   .option("-g, --group", "List recent messages for group thread")
-  .option("-n, --count <count>", "Number of messages (default: 20)", "20")
+  .option("-n, --count <count>", "Number of messages", "20")
+  .option("--source <source>", "Message source: live, db, or auto", "live")
   .option("-j, --json", "JSON output")
   .description("List recent messages (group uses direct history API when available)")
   .action(
     wrapAction(
       async (
         threadId: string,
-        opts: { group?: boolean; count: string; json?: boolean },
+        opts: { group?: boolean; count: string; json?: boolean; source?: string },
         command: Command,
       ) => {
-        const { api } = await requireApi(command);
+        const { api, profile } = await requireApi(command);
         const parsedCount = Number(opts.count);
         const count = Number.isFinite(parsedCount)
           ? Math.min(Math.max(Math.trunc(parsedCount), 1), 200)
           : 20;
 
         const threadType = opts.group ? ThreadType.Group : ThreadType.User;
-        const messages = opts.group
-          ? await fetchRecentGroupMessagesViaApi(api, threadId, count)
-          : await fetchRecentUserMessagesViaListener(
-              api,
-              threadId,
-              count,
-            );
-        const rows = messages.map((message) => ({
-          msgId: message.data.msgId,
-          cliMsgId: message.data.cliMsgId,
-          threadId: message.threadId || threadId,
-          threadType: message.type === ThreadType.Group ? "group" : "user",
-          senderId: message.data.uidFrom,
-          senderName: message.data.dName,
-          ts: message.data.ts,
-          msgType: message.data.msgType,
-          undo: {
+        const source = (opts.source ?? "live").trim().toLowerCase();
+        if (!["live", "db", "auto"].includes(source)) {
+          throw new Error("--source must be one of: live, db, auto");
+        }
+
+        let rows =
+          source === "db" || source === "auto"
+            ? await listRecentMessages({
+                profile,
+                threadId,
+                threadType: opts.group ? "group" : "user",
+                count,
+              })
+            : [];
+
+        if (source === "live" || (source === "auto" && rows.length === 0)) {
+          const messages = opts.group
+            ? await fetchRecentGroupMessagesViaApi(api, threadId, count)
+            : await fetchRecentUserMessagesViaListener(
+                api,
+                threadId,
+                count,
+              );
+          rows = messages.map((message) => ({
             msgId: message.data.msgId,
             cliMsgId: message.data.cliMsgId,
             threadId: message.threadId || threadId,
-            group: message.type === ThreadType.Group,
-          },
-          content:
-            typeof message.data.content === "string"
-              ? message.data.content
-              : JSON.stringify(message.data.content),
-        }));
+            threadType: message.type === ThreadType.Group ? "group" : "user",
+            senderId: message.data.uidFrom,
+            senderName: message.data.dName ?? "",
+            ts: message.data.ts,
+            msgType: message.data.msgType,
+            undo: {
+              msgId: message.data.msgId,
+              cliMsgId: message.data.cliMsgId,
+              threadId: message.threadId || threadId,
+              group: message.type === ThreadType.Group,
+            },
+            content:
+              typeof message.data.content === "string"
+                ? message.data.content
+                : JSON.stringify(message.data.content),
+          }));
+        }
 
         if (opts.json) {
           output(
@@ -4786,6 +6708,8 @@ program
   .option("-p, --prefix <prefix>", "Only process text starting with prefix")
   .option("-w, --webhook <url>", "POST message payload to webhook")
   .option("-r, --raw", "Output JSON line payload")
+  .option("--db", "Force DB persistence for this listener session")
+  .option("--no-db", "Disable DB persistence for this listener session")
   .option("-k, --keep-alive", "Auto restart listener on disconnect")
   .option(
     "--supervised",
@@ -4807,6 +6731,7 @@ program
           prefix?: string;
           webhook?: string;
           raw?: boolean;
+          db?: boolean;
           keepAlive?: boolean;
           supervised?: boolean;
           heartbeatMs?: string;
@@ -4849,6 +6774,8 @@ program
           process.env.OPENZCA_LISTEN_DOWNLOAD_QUOTE_MEDIA,
         );
         const sessionId = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 10)}`;
+        const selfId = api.getOwnId();
+        const dbWriteEnabled = await shouldWriteToDb(profile, getDbWriteOverride(opts));
 
         const emitLifecycle = (
           event: "session_id" | "connected" | "heartbeat" | "error" | "closed",
@@ -5161,6 +7088,7 @@ program
           });
           const mentionIds = mentions.map((item) => item.uid);
           const timestamp = toEpochSeconds(message.data.ts);
+          const timestampMs = toEpochMs(message.data.ts);
 
           const payload = {
             threadId: message.threadId,
@@ -5227,6 +7155,54 @@ program
             toId,
             ts: message.data.ts,
           };
+
+          if (dbWriteEnabled) {
+            const mediaForDb: DbMedia[] = mediaEntries.map((entry) => ({
+              mediaKind: mediaKind ?? undefined,
+              mediaUrl: entry.mediaUrl,
+              mediaPath: entry.mediaPath,
+              mediaType: entry.mediaType,
+              rawJson: JSON.stringify(entry),
+            }));
+            const mentionsForDb: DbMention[] = mentions.map((mention) => ({
+              uid: mention.uid,
+              pos: mention.pos,
+              len: mention.len,
+              type: mention.type,
+              rawJson: JSON.stringify(mention),
+            }));
+            scheduleDbWrite(profile, command, "listen.db.persist_error", async () => {
+              await persistMessage(
+                normalizeInboundListenRecord({
+                  profile,
+                  threadType: chatType,
+                  rawThreadId: message.threadId,
+                  senderId,
+                  senderName: senderDisplayName,
+                  toId,
+                  selfId,
+                  title: threadName,
+                  msgId: message.data.msgId,
+                  cliMsgId: message.data.cliMsgId,
+                  actionId: getStringCandidate(messageData, ["actionId"]),
+                  timestampMs,
+                  msgType: msgType || undefined,
+                  contentText: processedText || rawText || undefined,
+                  contentJson:
+                    rawContent && typeof rawContent === "object" ? JSON.stringify(rawContent) : undefined,
+                  quoteMsgId: quote?.globalMsgId ? String(quote.globalMsgId) : undefined,
+                  quoteCliMsgId: quote?.cliMsgId ? String(quote.cliMsgId) : undefined,
+                  quoteOwnerId: quote?.ownerId ? String(quote.ownerId) : undefined,
+                  quoteText: quote?.msg,
+                  media: mediaForDb,
+                  mentions: mentionsForDb,
+                  rawMessage: message.data,
+                  rawPayload: payload,
+                  source: "listen",
+                }),
+              );
+            });
+          }
 
           if (opts.raw) {
             console.log(JSON.stringify(payload));
