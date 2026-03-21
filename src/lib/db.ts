@@ -1610,6 +1610,15 @@ export async function listSyncState(params: {
   profile: string;
   threadType?: DbThreadType;
 }): Promise<DbSyncThreadStatus[]> {
+  const filename = await resolveDbPath(params.profile);
+  const exists = await fs
+    .access(filename)
+    .then(() => true)
+    .catch(() => false);
+  if (!exists) {
+    return [];
+  }
+
   const db = await getDb(params.profile);
   const rows = await db.all<SyncRow[]>(
     `

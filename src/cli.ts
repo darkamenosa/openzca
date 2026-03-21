@@ -272,6 +272,30 @@ function output(value: unknown, asJson = false): void {
   console.log(String(value));
 }
 
+function shouldOutputJson(opts?: { json?: boolean }): boolean {
+  return Boolean(opts?.json) || readCliFlag(["--json", "-j"]);
+}
+
+function normalizeCommandAliases(argv: string[]): string[] {
+  const normalized = [...argv];
+  const dbIndex = normalized.indexOf("db");
+  if (dbIndex === -1 || normalized[dbIndex + 1] !== "chat") {
+    return normalized;
+  }
+
+  const subcommandOrId = normalized[dbIndex + 2];
+  if (!subcommandOrId || subcommandOrId.startsWith("-")) {
+    return normalized;
+  }
+
+  if (["list", "info", "messages", "help"].includes(subcommandOrId)) {
+    return normalized;
+  }
+
+  normalized.splice(dbIndex + 2, 0, "messages");
+  return normalized;
+}
+
 function asThreadType(groupFlag?: boolean): ThreadType {
   return groupFlag ? ThreadType.Group : ThreadType.User;
 }
@@ -4627,60 +4651,7 @@ dbFriend
 
 const dbChat = dbCmd
   .command("chat")
-  .argument("[chatId]")
-  .option("-g, --group", "Read as a group chat")
-  .option("--since <duration>", "Rolling window ending now: duration like 30s, 7m, 24h, 7d, or 2w")
-  .option("--from <time>", "Lower time bound: ISO timestamp, date, or unix seconds/ms")
-  .option("--until <time>", "Upper time bound: ISO timestamp, date, or unix seconds/ms")
-  .option("--to <time>", "Alias for --until")
-  .option("--limit <count>", "Maximum number of rows")
-  .option("--all", "Return all matching rows")
-  .option("--oldest-first", "Sort oldest-first instead of newest-first")
-  .option("-j, --json", "JSON output")
-  .description("Query stored conversation data")
-  .action(
-    wrapAction(async (
-      chatId: string | undefined,
-      opts: {
-        group?: boolean;
-        since?: string;
-        from?: string;
-        until?: string;
-        to?: string;
-        limit?: string;
-        all?: boolean;
-        oldestFirst?: boolean;
-        json?: boolean;
-      },
-      command: Command,
-    ) => {
-      if (!chatId) {
-        command.help();
-        return;
-      }
-      const profile = await currentProfile(command);
-      const threadType = await resolveStoredChatThreadType(profile, chatId, opts.group);
-      const { sinceMs, untilMs, limit, newestFirst } = resolveMessageQueryOptions(opts);
-      const rows = await listMessages({
-        profile,
-        threadId: chatId,
-        threadType,
-        sinceMs,
-        untilMs,
-        limit,
-        newestFirst,
-      });
-      output(
-        {
-          chatId,
-          threadType,
-          count: rows.length,
-          messages: rows,
-        },
-        Boolean(opts.json),
-      );
-    }),
-  );
+  .description("Query stored conversation data");
 
 dbChat
   .command("list")
@@ -4689,7 +4660,7 @@ dbChat
   .action(
     wrapAction(async (opts: { json?: boolean }, command: Command) => {
       const profile = await currentProfile(command);
-      output(await listChats(profile), Boolean(opts.json));
+      output(await listChats(profile), shouldOutputJson(opts));
     }),
   );
 
@@ -4713,7 +4684,7 @@ dbChat
       if (!row) {
         throw new Error(`Chat not found in DB: ${chatId}`);
       }
-      output(row, Boolean(opts.json));
+      output(row, shouldOutputJson(opts));
     }),
   );
 
@@ -4764,7 +4735,7 @@ dbChat
           count: rows.length,
           messages: rows,
         },
-        Boolean(opts.json),
+        shouldOutputJson(opts),
       );
     }),
   );
@@ -7406,4 +7377,4 @@ program
     ),
   );
 
-program.parseAsync(process.argv);
+program.parseAsync(normalizeCommandAliases(process.argv));
