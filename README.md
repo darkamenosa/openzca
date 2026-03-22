@@ -40,6 +40,12 @@ openzca msg send GROUP_ID "Hello team" --group
 openzca msg send GROUP_ID "Hi @Alice Nguyen" --group
 openzca msg send GROUP_ID "Hi @123456789" --group
 
+# Reply using a stored DB message id
+openzca msg send USER_ID "Reply text" --reply-id MSG_ID
+
+# Reply without DB using a listen --raw payload
+openzca msg send USER_ID "Reply text" --reply-message '{"threadId":"...","msgId":"...","cliMsgId":"...","content":"...","msgType":"webchat","senderId":"...","toId":"...","ts":"..."}'
+
 # Listen for incoming messages
 openzca listen
 
@@ -91,7 +97,7 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 
 | Command | Description |
 |---------|-------------|
-| `openzca msg send <threadId> <message>` | Send text with formatting (`**bold**`, `*italic*`, `~~strike~~`, etc.) and group @mention resolution (`--raw` to skip formatting) |
+| `openzca msg send <threadId> <message>` | Send text with formatting (`**bold**`, `*italic*`, `~~strike~~`, etc.), group @mention resolution (`--raw` to skip formatting), and quote replies via `--reply-id` or `--reply-message` |
 | `openzca msg image <threadId> [file]` | Send image(s) from file or URL |
 | `openzca msg video <threadId> [file]` | Send video(s) from file or URL; single `.mp4` inputs try native video mode |
 | `openzca msg voice <threadId> [file]` | Send voice message from local file or URL (`.aac`, `.mp3`, `.m4a`, `.wav`, `.ogg`) |
@@ -115,6 +121,11 @@ Media commands accept local files, `file://` paths, and repeatable `--url` optio
 `openzca msg video` attempts native video send for a single `.mp4` input by uploading the video and thumbnail to Zalo first. If `ffmpeg` is unavailable, the input is not a single `.mp4`, or native send fails, it falls back to the normal attachment send path. Use `--thumbnail <path-or-url>` to supply the preview image explicitly.
 Local paths using `~` are expanded automatically (for positional file args, `--url`, and `OPENZCA_LISTEN_MEDIA_DIR`).
 Group text sends via `openzca msg send --group` resolve unique `@Name` or `@userId` mentions against the current group member list using member ids, display names, and usernames. Mention offsets are computed after formatting markers are parsed, so messages like `**@Alice Nguyen** hello` work. If multiple members share the same label, the command fails instead of guessing.
+Reply flows:
+
+- `--reply-id <id>` resolves a stored message from the local DB by `msgId`, `cliMsgId`, or internal message uid. This requires DB persistence to be enabled for the profile.
+- `--reply-message <json>` accepts either the original `message.data` object from `zca-js` or the current `openzca listen --raw` payload. Use this path when DB is disabled or when a caller already has the inbound payload in memory.
+- Use exactly one of `--reply-id` or `--reply-message`.
 `msg recent` keeps the previous live behavior by default. Use `--source db` to read only from the local SQLite store, or `--source auto` to try DB first and fall back to live history.
 
 ### Debug Logging

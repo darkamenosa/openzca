@@ -20,6 +20,7 @@ import {
   ThreadType,
   type API,
   type Credentials,
+  type SendMessageQuote,
 } from "zca-js";
 import {
   APP_HOME,
@@ -99,6 +100,7 @@ import {
 } from "./lib/group-mentions.js";
 import { buildTextSendPayload } from "./lib/text-send.js";
 import { isFfmpegAvailable, planVideoSendMode, sendNativeVideo } from "./lib/video-send.js";
+import { prepareReplyMessage, prepareStoredReplyMessage } from "./lib/reply.js";
 
 const program = new Command();
 
@@ -1087,6 +1089,76 @@ async function shouldWriteToDb(profile: string, override?: boolean): Promise<boo
     return override;
   }
   return isDbEnabled(profile);
+}
+
+async function resolveSendReplyQuote(params: {
+  profile: string;
+  api: API;
+  threadId: string;
+  threadType: ThreadType;
+  replyId?: string;
+  replyMessage?: string;
+}): Promise<SendMessageQuote | undefined> {
+  const replyId = params.replyId?.trim();
+  const replyMessage = params.replyMessage?.trim();
+
+  if (replyId && replyMessage) {
+    throw new Error("Use either --reply-id or --reply-message, not both.");
+  }
+  if (!replyId && !replyMessage) {
+    return undefined;
+  }
+
+  if (replyId) {
+    if (!(await shouldWriteToDb(params.profile))) {
+      throw new Error("`--reply-id` requires the local DB. Enable DB/listen sync first.");
+    }
+
+    const row = await getMessageById({
+      profile: params.profile,
+      id: replyId,
+    });
+    if (!row) {
+      throw new Error(`Reply source not found in DB: ${replyId}`);
+    }
+    if ((row.threadType === "group") !== (params.threadType === ThreadType.Group)) {
+      throw new Error("Reply source thread type does not match --group.");
+    }
+    if (row.threadId !== params.threadId) {
+      throw new Error("Reply source belongs to a different thread.");
+    }
+    if (!row.rawMessage || typeof row.rawMessage !== "object") {
+      if (!row.rawPayload || typeof row.rawPayload !== "object") {
+        throw new Error(
+          "Reply source found in DB but has no reusable raw message payload. Re-sync or capture it via listener first.",
+        );
+      }
+    }
+
+    return prepareStoredReplyMessage(row, {
+      threadId: params.threadId,
+      threadType: params.threadType,
+      selfId: params.api.getOwnId(),
+    });
+  }
+
+  let parsedReplyMessage: unknown;
+  try {
+    parsedReplyMessage = JSON.parse(replyMessage as string);
+  } catch (error) {
+    throw new Error(
+      `Invalid JSON for --reply-message: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const preparedReply = prepareReplyMessage(parsedReplyMessage, {
+    threadType: params.threadType,
+    selfId: params.api.getOwnId(),
+  });
+  if (preparedReply.inferredThreadId && preparedReply.inferredThreadId !== params.threadId) {
+    throw new Error("Reply message belongs to a different thread.");
+  }
+  return preparedReply.quote;
 }
 
 function scheduleDbWrite(
@@ -4879,18 +4951,40 @@ msg
   .command("send <threadId> <message>")
   .option("-g, --group", "Send to group")
   .option("--raw", "Send raw text without parsing formatting markers")
+  .option("--reply-id <id>", "Reply using a stored DB message id/msgId/cliMsgId")
+  .option("--reply-message <json>", "Reply using a raw message.data JSON object")
   .description("Send text message with formatting (**bold** *italic* __bold__ ~~strike~~ {underline}text{/underline} {red}color{/red} {big}size{/big} lists indents). Group sends also resolve unique @Name/@userId mentions.")
   .action(
-    wrapAction(async (threadId: string, message: string, opts: { group?: boolean; raw?: boolean }, command: Command) => {
+    wrapAction(async (
+      threadId: string,
+      message: string,
+      opts: { group?: boolean; raw?: boolean; replyId?: string; replyMessage?: string },
+      command: Command,
+    ) => {
       const { api, profile } = await requireApi(command);
       const threadType = asThreadType(opts.group);
-      const payload = await buildTextSendPayload({
+      const textPayload = await buildTextSendPayload({
         message,
         raw: opts.raw,
         threadType,
         threadId,
         listGroupMembers: threadType === ThreadType.Group ? (groupId) => listGroupMentionMembers(api, groupId) : undefined,
       });
+      const quote = await resolveSendReplyQuote({
+        profile,
+        api,
+        threadId,
+        threadType,
+        replyId: opts.replyId,
+        replyMessage: opts.replyMessage,
+      });
+      const payload =
+        quote || typeof textPayload !== "string"
+          ? {
+              ...(typeof textPayload === "string" ? { msg: textPayload } : textPayload),
+              ...(quote ? { quote } : {}),
+            }
+          : textPayload;
       const response = await api.sendMessage(payload, threadId, threadType);
       output(response, false);
       if (await shouldWriteToDb(profile)) {
