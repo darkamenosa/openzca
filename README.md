@@ -19,7 +19,9 @@ Or run without installing:
 npx openzca --help
 ```
 
-Requires Node.js 18+.
+Requires Node.js 22.13+.
+
+The built-in DB backend now uses Node's official `node:sqlite` module, so no extra `sqlite3` native addon is installed.
 
 ## Quick start
 

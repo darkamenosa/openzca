@@ -11,7 +11,7 @@ openzca is a Node.js CLI for Zalo messaging (command-compatible with zca-cli.dev
 ```bash
 npm install          # install dependencies
 npm test             # run the Node test suite via tsx
-npm run build        # build with tsup (ESM, node18 target) → dist/
+npm run build        # build with tsup (ESM, node22 target) → dist/
 npm run dev          # run directly via tsx (no build needed)
 npm run typecheck    # full TypeScript check (tsc --noEmit)
 npm run lint         # same as typecheck

@@ -1,6 +1,6 @@
 {
   "name": "openzca",
-  "version": "0.1.50",
+  "version": "0.1.51",
   "description": "Open-source zca-compatible CLI to integrate Zalo with OpenClaw",
   "type": "module",
   "bin": {
@@ -14,11 +14,14 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsup src/cli.ts --format esm --target node18 --out-dir dist --clean",
+    "build": "npm run build:cli && npm run build:worker",
+    "build:cli": "tsup src/cli.ts --format esm --target node22 --out-dir dist --clean",
+    "build:worker": "tsup src/lib/db-worker.ts --format esm --target node22 --out-dir dist",
     "dev": "tsx src/cli.ts",
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -39,15 +42,13 @@
     "url": "https://github.com/darkamenosa/openzca/issues"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13.0"
   },
   "dependencies": {
     "@types/qrcode-terminal": "^0.12.2",
     "commander": "^14.0.3",
     "image-size": "^2.0.2",
     "qrcode-terminal": "^0.12.0",
-    "sqlite": "^5.1.1",
-    "sqlite3": "^6.0.1",
     "zca-js": "^2.1.2"
   },
   "devDependencies": {

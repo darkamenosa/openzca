@@ -1,9 +1,235 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
-import { open, type Database } from "sqlite";
-import sqlite3 from "sqlite3";
+import { Worker } from "node:worker_threads";
+import type { DbStatement, DbWorkerRequest, DbWorkerResponse, SerializedDbError } from "./db-protocol.js";
 import { getProfileDir } from "./store.js";
+
+const require = createRequire(import.meta.url);
+
+function buildDbError(error: SerializedDbError): Error & { code?: string } {
+  const built = new Error(error.message) as Error & { code?: string };
+  built.name = error.name || "Error";
+  built.stack = error.stack ?? built.stack;
+  built.code = error.code;
+  return built;
+}
+
+function resolveWorkerSpec(): { url: URL; execArgv?: string[] } {
+  const currentUrl = new URL(import.meta.url);
+  if (currentUrl.pathname.endsWith("/src/lib/db.ts")) {
+    return {
+      url: new URL("./db-worker.ts", currentUrl),
+      execArgv: ["--import", require.resolve("tsx")],
+    };
+  }
+  return {
+    url: new URL("./db-worker.js", currentUrl),
+  };
+}
+
+class Database {
+  #worker: Worker;
+  #closed = false;
+  #closing = false;
+  #released = false;
+  #nextId = 1;
+  #activeRequests = 0;
+  #idleTimer: NodeJS.Timeout | undefined;
+  #closePromise: Promise<void> | undefined;
+  #pending = new Map<number, {
+    resolve: (value: unknown) => void;
+    reject: (reason?: unknown) => void;
+  }>();
+  readonly #ready: Promise<void>;
+  readonly #exited: Promise<void>;
+  readonly #releaseConnection: () => void;
+
+  constructor(worker: Worker, releaseConnection: () => void) {
+    this.#worker = worker;
+    this.#releaseConnection = releaseConnection;
+    let resolveReady!: () => void;
+    let rejectReady!: (reason?: unknown) => void;
+    this.#ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    let resolveExited: () => void;
+    this.#exited = new Promise<void>((resolve) => {
+      resolveExited = resolve;
+    });
+
+    const rejectPending = (error: Error): void => {
+      for (const { reject } of this.#pending.values()) {
+        reject(error);
+      }
+      this.#pending.clear();
+    };
+
+    worker.on("message", (message: DbWorkerResponse) => {
+      if (message.type === "ready") {
+        resolveReady();
+        return;
+      }
+      if (message.type === "fatal") {
+        const error = buildDbError(message.error);
+        rejectReady(error);
+        rejectPending(error);
+        return;
+      }
+      const pending = this.#pending.get(message.id);
+      if (!pending) {
+        return;
+      }
+      this.#pending.delete(message.id);
+      if (message.type === "error") {
+        pending.reject(buildDbError(message.error));
+        return;
+      }
+      pending.resolve(message.result);
+    });
+
+    worker.once("error", (error) => {
+      rejectReady(error);
+      rejectPending(error instanceof Error ? error : new Error(String(error)));
+    });
+
+    worker.once("exit", (code) => {
+      this.#closed = true;
+      this.#release();
+      resolveExited();
+      const error = new Error(
+        code === 0 ? "DB worker exited" : `DB worker exited with code ${code}`,
+      );
+      if (code !== 0) {
+        rejectReady(error);
+      }
+      if (this.#pending.size > 0) {
+        rejectPending(error);
+      }
+    });
+  }
+
+  static async open(filename: string, onClosed: () => void): Promise<Database> {
+    const { url, execArgv } = resolveWorkerSpec();
+    const worker = new Worker(url, {
+      execArgv,
+      workerData: { filename },
+    });
+    worker.unref();
+    const db = new Database(worker, onClosed);
+    await db.#ready;
+    return db;
+  }
+
+  get isClosing(): boolean {
+    return this.#closing || this.#closed;
+  }
+
+  #release(): void {
+    if (this.#released) {
+      return;
+    }
+    this.#released = true;
+    this.#releaseConnection();
+  }
+
+  #clearIdleClose(): void {
+    if (this.#idleTimer) {
+      clearTimeout(this.#idleTimer);
+      this.#idleTimer = undefined;
+    }
+  }
+
+  #scheduleIdleClose(): void {
+    this.#clearIdleClose();
+    this.#idleTimer = setTimeout(() => {
+      if (this.#activeRequests === 0 && !this.#closed) {
+        void this.close().catch(() => {
+          // Best effort idle cleanup.
+        });
+      }
+    }, 100);
+    this.#idleTimer.unref();
+  }
+
+  async #request(type: DbWorkerRequest["type"], payload?: unknown): Promise<unknown> {
+    if (this.#closed) {
+      throw new Error("DB worker is closed");
+    }
+    if (this.#closing && type !== "close") {
+      throw new Error("DB worker is closing");
+    }
+    this.#clearIdleClose();
+    this.#activeRequests += 1;
+    await this.#ready;
+    const id = this.#nextId;
+    this.#nextId += 1;
+    const request = payload === undefined
+      ? ({ id, type } as DbWorkerRequest)
+      : ({ id, type, payload } as DbWorkerRequest);
+    const result = new Promise<unknown>((resolve, reject) => {
+      this.#pending.set(id, { resolve, reject });
+    });
+    try {
+      this.#worker.postMessage(request);
+    } catch (error) {
+      this.#pending.delete(id);
+      throw error;
+    }
+    try {
+      return await result;
+    } finally {
+      this.#activeRequests -= 1;
+      if (this.#activeRequests === 0 && !this.#closed && !this.#closing) {
+        this.#scheduleIdleClose();
+      }
+    }
+  }
+
+  async exec(sql: string): Promise<void> {
+    await this.#request("exec", { sql });
+  }
+
+  async run(sql: string, params: DbStatement["params"] = []): Promise<{ changes: number; lastInsertRowid: number | bigint }> {
+    return await this.#request("run", { sql, params }) as {
+      changes: number;
+      lastInsertRowid: number | bigint;
+    };
+  }
+
+  async get<T>(sql: string, params: DbStatement["params"] = []): Promise<T | undefined> {
+    const result = await this.#request("get", { sql, params });
+    return (result ?? undefined) as T | undefined;
+  }
+
+  async all<T>(sql: string, params: DbStatement["params"] = []): Promise<T> {
+    return await this.#request("all", { sql, params }) as T;
+  }
+
+  async batch(commands: DbStatement[], transactional = false): Promise<void> {
+    await this.#request("batch", { commands, transactional });
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) {
+      return;
+    }
+    if (this.#closePromise) {
+      return this.#closePromise;
+    }
+    this.#closePromise = (async () => {
+      this.#closing = true;
+      this.#release();
+      this.#clearIdleClose();
+      await this.#request("close");
+      this.#closed = true;
+      await this.#exited;
+    })();
+    return this.#closePromise;
+  }
+}
 
 export type DbConfig = {
   enabled: boolean;
@@ -184,6 +410,76 @@ const DB_FILENAME = "messages.sqlite";
 const connections = new Map<string, Promise<Database>>();
 const writeQueues = new Map<string, Promise<void>>();
 
+const UPSERT_THREAD_SQL = `
+  INSERT INTO threads (
+    profile, scope_thread_id, raw_thread_id, thread_type, peer_id, title,
+    is_pinned, is_hidden, is_archived, raw_json, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(profile, scope_thread_id) DO UPDATE SET
+    raw_thread_id = excluded.raw_thread_id,
+    thread_type = excluded.thread_type,
+    peer_id = COALESCE(excluded.peer_id, threads.peer_id),
+    title = COALESCE(excluded.title, threads.title),
+    is_pinned = excluded.is_pinned,
+    is_hidden = excluded.is_hidden,
+    is_archived = excluded.is_archived,
+    raw_json = COALESCE(excluded.raw_json, threads.raw_json),
+    updated_at = excluded.updated_at
+`;
+
+const INSERT_THREAD_MEMBER_SQL = `
+  INSERT INTO thread_members (
+    profile, scope_thread_id, user_id, display_name, zalo_name, avatar,
+    account_status, member_type, raw_json, snapshot_at_ms, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`;
+
+const UPSERT_MESSAGE_SQL = `
+  INSERT INTO messages (
+    profile, message_uid, scope_thread_id, raw_thread_id, thread_type,
+    msg_id, cli_msg_id, action_id, sender_id, sender_name, to_id,
+    timestamp_ms, msg_type, content_text, content_json,
+    quote_msg_id, quote_cli_msg_id, quote_owner_id, quote_text,
+    source, raw_message_json, raw_payload_json, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(profile, message_uid) DO UPDATE SET
+    scope_thread_id = excluded.scope_thread_id,
+    raw_thread_id = excluded.raw_thread_id,
+    thread_type = excluded.thread_type,
+    msg_id = COALESCE(excluded.msg_id, messages.msg_id),
+    cli_msg_id = COALESCE(excluded.cli_msg_id, messages.cli_msg_id),
+    action_id = COALESCE(excluded.action_id, messages.action_id),
+    sender_id = COALESCE(excluded.sender_id, messages.sender_id),
+    sender_name = COALESCE(excluded.sender_name, messages.sender_name),
+    to_id = COALESCE(excluded.to_id, messages.to_id),
+    timestamp_ms = excluded.timestamp_ms,
+    msg_type = COALESCE(excluded.msg_type, messages.msg_type),
+    content_text = COALESCE(excluded.content_text, messages.content_text),
+    content_json = COALESCE(excluded.content_json, messages.content_json),
+    quote_msg_id = COALESCE(excluded.quote_msg_id, messages.quote_msg_id),
+    quote_cli_msg_id = COALESCE(excluded.quote_cli_msg_id, messages.quote_cli_msg_id),
+    quote_owner_id = COALESCE(excluded.quote_owner_id, messages.quote_owner_id),
+    quote_text = COALESCE(excluded.quote_text, messages.quote_text),
+    source = excluded.source,
+    raw_message_json = COALESCE(excluded.raw_message_json, messages.raw_message_json),
+    raw_payload_json = COALESCE(excluded.raw_payload_json, messages.raw_payload_json),
+    updated_at = excluded.updated_at
+`;
+
+const INSERT_MESSAGE_MEDIA_SQL = `
+  INSERT INTO message_media (
+    profile, message_uid, item_index, media_kind, media_url,
+    media_path, media_type, raw_json, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`;
+
+const INSERT_MESSAGE_MENTION_SQL = `
+  INSERT INTO message_mentions (
+    profile, message_uid, item_index, target_user_id, pos, len,
+    mention_type, raw_json, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`;
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -329,167 +625,22 @@ export async function resolveDbPath(profile: string): Promise<string> {
     : path.resolve(getProfileDir(profile), configured);
 }
 
-async function migrateDb(db: Database): Promise<void> {
-  await db.exec(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA foreign_keys = ON;
-
-    CREATE TABLE IF NOT EXISTS threads (
-      profile TEXT NOT NULL,
-      scope_thread_id TEXT NOT NULL,
-      raw_thread_id TEXT NOT NULL,
-      thread_type TEXT NOT NULL,
-      peer_id TEXT,
-      title TEXT,
-      is_pinned INTEGER NOT NULL DEFAULT 0,
-      is_hidden INTEGER NOT NULL DEFAULT 0,
-      is_archived INTEGER NOT NULL DEFAULT 0,
-      raw_json TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (profile, scope_thread_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS thread_members (
-      profile TEXT NOT NULL,
-      scope_thread_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      display_name TEXT,
-      zalo_name TEXT,
-      avatar TEXT,
-      account_status INTEGER,
-      member_type INTEGER,
-      raw_json TEXT,
-      snapshot_at_ms INTEGER NOT NULL,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (profile, scope_thread_id, user_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS friends (
-      profile TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      display_name TEXT,
-      zalo_name TEXT,
-      avatar TEXT,
-      account_status INTEGER,
-      raw_json TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (profile, user_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS self_profiles (
-      profile TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      display_name TEXT,
-      info_json TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (profile)
-    );
-
-    CREATE TABLE IF NOT EXISTS messages (
-      profile TEXT NOT NULL,
-      message_uid TEXT NOT NULL,
-      scope_thread_id TEXT NOT NULL,
-      raw_thread_id TEXT NOT NULL,
-      thread_type TEXT NOT NULL,
-      msg_id TEXT,
-      cli_msg_id TEXT,
-      action_id TEXT,
-      sender_id TEXT,
-      sender_name TEXT,
-      to_id TEXT,
-      timestamp_ms INTEGER NOT NULL,
-      msg_type TEXT,
-      content_text TEXT,
-      content_json TEXT,
-      quote_msg_id TEXT,
-      quote_cli_msg_id TEXT,
-      quote_owner_id TEXT,
-      quote_text TEXT,
-      source TEXT NOT NULL,
-      raw_message_json TEXT,
-      raw_payload_json TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (profile, message_uid)
-    );
-
-    CREATE TABLE IF NOT EXISTS message_media (
-      profile TEXT NOT NULL,
-      message_uid TEXT NOT NULL,
-      item_index INTEGER NOT NULL,
-      media_kind TEXT,
-      media_url TEXT,
-      media_path TEXT,
-      media_type TEXT,
-      raw_json TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (profile, message_uid, item_index)
-    );
-
-    CREATE TABLE IF NOT EXISTS message_mentions (
-      profile TEXT NOT NULL,
-      message_uid TEXT NOT NULL,
-      item_index INTEGER NOT NULL,
-      target_user_id TEXT NOT NULL,
-      pos INTEGER,
-      len INTEGER,
-      mention_type INTEGER,
-      raw_json TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (profile, message_uid, item_index)
-    );
-
-    CREATE TABLE IF NOT EXISTS sync_state (
-      profile TEXT NOT NULL,
-      scope TEXT NOT NULL,
-      scope_thread_id TEXT NOT NULL,
-      thread_type TEXT NOT NULL,
-      status TEXT NOT NULL,
-      completeness TEXT,
-      cursor TEXT,
-      last_sync_at TEXT,
-      error TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (profile, scope)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_messages_thread_time
-      ON messages (profile, scope_thread_id, timestamp_ms DESC);
-    CREATE INDEX IF NOT EXISTS idx_messages_msg_id
-      ON messages (profile, msg_id);
-    CREATE INDEX IF NOT EXISTS idx_messages_cli_msg_id
-      ON messages (profile, cli_msg_id);
-    CREATE INDEX IF NOT EXISTS idx_threads_type
-      ON threads (profile, thread_type, updated_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_members_thread
-      ON thread_members (profile, scope_thread_id);
-    CREATE INDEX IF NOT EXISTS idx_friends_name
-      ON friends (profile, display_name, zalo_name, user_id);
-  `);
-}
-
 async function openDb(profile: string): Promise<Database> {
   const filename = await resolveDbPath(profile);
   await fs.mkdir(path.dirname(filename), { recursive: true });
-  const db = await open({
-    filename,
-    driver: sqlite3.Database,
+  return Database.open(filename, () => {
+    connections.delete(profile);
   });
-  await migrateDb(db);
-  return db;
 }
 
 export async function getDb(profile: string): Promise<Database> {
   const existing = connections.get(profile);
   if (existing) {
-    return existing;
+    const db = await existing;
+    if (!db.isClosing) {
+      return db;
+    }
+    connections.delete(profile);
   }
   const created = openDb(profile).catch((error) => {
     connections.delete(profile);
@@ -630,38 +781,20 @@ export function enqueueDbWrite(profile: string, task: () => Promise<void>): void
 export async function persistThread(record: DbThreadRecord): Promise<void> {
   const db = await getDb(record.profile);
   const now = nowIso();
-  await db.run(
-    `
-      INSERT INTO threads (
-        profile, scope_thread_id, raw_thread_id, thread_type, peer_id, title,
-        is_pinned, is_hidden, is_archived, raw_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(profile, scope_thread_id) DO UPDATE SET
-        raw_thread_id = excluded.raw_thread_id,
-        thread_type = excluded.thread_type,
-        peer_id = COALESCE(excluded.peer_id, threads.peer_id),
-        title = COALESCE(excluded.title, threads.title),
-        is_pinned = excluded.is_pinned,
-        is_hidden = excluded.is_hidden,
-        is_archived = excluded.is_archived,
-        raw_json = COALESCE(excluded.raw_json, threads.raw_json),
-        updated_at = excluded.updated_at
-    `,
-    [
-      record.profile,
-      record.scopeThreadId,
-      record.rawThreadId,
-      record.threadType,
-      record.peerId ?? null,
-      record.title ?? null,
-      record.isPinned ? 1 : 0,
-      record.isHidden ? 1 : 0,
-      record.isArchived ? 1 : 0,
-      record.rawJson ?? null,
-      now,
-      now,
-    ],
-  );
+  await db.run(UPSERT_THREAD_SQL, [
+    record.profile,
+    record.scopeThreadId,
+    record.rawThreadId,
+    record.threadType,
+    record.peerId ?? null,
+    record.title ?? null,
+    record.isPinned ? 1 : 0,
+    record.isHidden ? 1 : 0,
+    record.isArchived ? 1 : 0,
+    record.rawJson ?? null,
+    now,
+    now,
+  ]);
 }
 
 export async function replaceThreadMembers(
@@ -671,41 +804,30 @@ export async function replaceThreadMembers(
 ): Promise<void> {
   const db = await getDb(profile);
   const now = nowIso();
-  await db.exec("BEGIN");
-  try {
-    await db.run(
-      `DELETE FROM thread_members WHERE profile = ? AND scope_thread_id = ?`,
-      [profile, scopeThreadId],
-    );
-    for (const member of members) {
-      await db.run(
-        `
-          INSERT INTO thread_members (
-            profile, scope_thread_id, user_id, display_name, zalo_name, avatar,
-            account_status, member_type, raw_json, snapshot_at_ms, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-        [
-          member.profile,
-          member.scopeThreadId,
-          member.userId,
-          member.displayName ?? null,
-          member.zaloName ?? null,
-          member.avatar ?? null,
-          member.accountStatus ?? null,
-          member.memberType ?? null,
-          member.rawJson ?? null,
-          member.snapshotAtMs,
-          now,
-          now,
-        ],
-      );
-    }
-    await db.exec("COMMIT");
-  } catch (error) {
-    await db.exec("ROLLBACK");
-    throw error;
-  }
+  const commands: DbStatement[] = [
+    {
+      sql: `DELETE FROM thread_members WHERE profile = ? AND scope_thread_id = ?`,
+      params: [profile, scopeThreadId],
+    },
+    ...members.map((member) => ({
+      sql: INSERT_THREAD_MEMBER_SQL,
+      params: [
+        member.profile,
+        member.scopeThreadId,
+        member.userId,
+        member.displayName ?? null,
+        member.zaloName ?? null,
+        member.avatar ?? null,
+        member.accountStatus ?? null,
+        member.memberType ?? null,
+        member.rawJson ?? null,
+        member.snapshotAtMs,
+        now,
+        now,
+      ],
+    })),
+  ];
+  await db.batch(commands, true);
 }
 
 export async function persistFriend(record: DbFriendRecord): Promise<void> {
@@ -773,51 +895,27 @@ export async function persistMessage(record: DbMessageRecord): Promise<void> {
   const db = await getDb(record.profile);
   const now = nowIso();
   const messageUid = toMessageUid(record);
-
-  await db.exec("BEGIN");
-  try {
-    await persistThread({
-      profile: record.profile,
-      scopeThreadId: record.scopeThreadId,
-      rawThreadId: record.rawThreadId,
-      threadType: record.threadType,
-      peerId: record.peerId,
-      title: record.title,
-    });
-
-    await db.run(
-      `
-        INSERT INTO messages (
-          profile, message_uid, scope_thread_id, raw_thread_id, thread_type,
-          msg_id, cli_msg_id, action_id, sender_id, sender_name, to_id,
-          timestamp_ms, msg_type, content_text, content_json,
-          quote_msg_id, quote_cli_msg_id, quote_owner_id, quote_text,
-          source, raw_message_json, raw_payload_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(profile, message_uid) DO UPDATE SET
-          scope_thread_id = excluded.scope_thread_id,
-          raw_thread_id = excluded.raw_thread_id,
-          thread_type = excluded.thread_type,
-          msg_id = COALESCE(excluded.msg_id, messages.msg_id),
-          cli_msg_id = COALESCE(excluded.cli_msg_id, messages.cli_msg_id),
-          action_id = COALESCE(excluded.action_id, messages.action_id),
-          sender_id = COALESCE(excluded.sender_id, messages.sender_id),
-          sender_name = COALESCE(excluded.sender_name, messages.sender_name),
-          to_id = COALESCE(excluded.to_id, messages.to_id),
-          timestamp_ms = excluded.timestamp_ms,
-          msg_type = COALESCE(excluded.msg_type, messages.msg_type),
-          content_text = COALESCE(excluded.content_text, messages.content_text),
-          content_json = COALESCE(excluded.content_json, messages.content_json),
-          quote_msg_id = COALESCE(excluded.quote_msg_id, messages.quote_msg_id),
-          quote_cli_msg_id = COALESCE(excluded.quote_cli_msg_id, messages.quote_cli_msg_id),
-          quote_owner_id = COALESCE(excluded.quote_owner_id, messages.quote_owner_id),
-          quote_text = COALESCE(excluded.quote_text, messages.quote_text),
-          source = excluded.source,
-          raw_message_json = COALESCE(excluded.raw_message_json, messages.raw_message_json),
-          raw_payload_json = COALESCE(excluded.raw_payload_json, messages.raw_payload_json),
-          updated_at = excluded.updated_at
-      `,
-      [
+  const commands: DbStatement[] = [
+    {
+      sql: UPSERT_THREAD_SQL,
+      params: [
+        record.profile,
+        record.scopeThreadId,
+        record.rawThreadId,
+        record.threadType,
+        record.peerId ?? null,
+        record.title ?? null,
+        0,
+        0,
+        0,
+        null,
+        now,
+        now,
+      ],
+    },
+    {
+      sql: UPSERT_MESSAGE_SQL,
+      params: [
         record.profile,
         messageUid,
         record.scopeThreadId,
@@ -843,68 +941,47 @@ export async function persistMessage(record: DbMessageRecord): Promise<void> {
         now,
         now,
       ],
-    );
-
-    await db.run(
-      `DELETE FROM message_media WHERE profile = ? AND message_uid = ?`,
-      [record.profile, messageUid],
-    );
-    await db.run(
-      `DELETE FROM message_mentions WHERE profile = ? AND message_uid = ?`,
-      [record.profile, messageUid],
-    );
-
-    for (const [index, media] of (record.media ?? []).entries()) {
-      await db.run(
-        `
-          INSERT INTO message_media (
-            profile, message_uid, item_index, media_kind, media_url,
-            media_path, media_type, raw_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-        [
-          record.profile,
-          messageUid,
-          index,
-          media.mediaKind ?? null,
-          media.mediaUrl ?? null,
-          media.mediaPath ?? null,
-          media.mediaType ?? null,
-          media.rawJson ?? null,
-          now,
-          now,
-        ],
-      );
-    }
-
-    for (const [index, mention] of (record.mentions ?? []).entries()) {
-      await db.run(
-        `
-          INSERT INTO message_mentions (
-            profile, message_uid, item_index, target_user_id, pos, len,
-            mention_type, raw_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-        [
-          record.profile,
-          messageUid,
-          index,
-          mention.uid,
-          mention.pos ?? null,
-          mention.len ?? null,
-          mention.type ?? null,
-          mention.rawJson ?? null,
-          now,
-          now,
-        ],
-      );
-    }
-
-    await db.exec("COMMIT");
-  } catch (error) {
-    await db.exec("ROLLBACK");
-    throw error;
-  }
+    },
+    {
+      sql: `DELETE FROM message_media WHERE profile = ? AND message_uid = ?`,
+      params: [record.profile, messageUid],
+    },
+    {
+      sql: `DELETE FROM message_mentions WHERE profile = ? AND message_uid = ?`,
+      params: [record.profile, messageUid],
+    },
+    ...(record.media ?? []).map((media, index) => ({
+      sql: INSERT_MESSAGE_MEDIA_SQL,
+      params: [
+        record.profile,
+        messageUid,
+        index,
+        media.mediaKind ?? null,
+        media.mediaUrl ?? null,
+        media.mediaPath ?? null,
+        media.mediaType ?? null,
+        media.rawJson ?? null,
+        now,
+        now,
+      ],
+    })),
+    ...(record.mentions ?? []).map((mention, index) => ({
+      sql: INSERT_MESSAGE_MENTION_SQL,
+      params: [
+        record.profile,
+        messageUid,
+        index,
+        mention.uid,
+        mention.pos ?? null,
+        mention.len ?? null,
+        mention.type ?? null,
+        mention.rawJson ?? null,
+        now,
+        now,
+      ],
+    })),
+  ];
+  await db.batch(commands, true);
 }
 
 export async function setSyncState(params: {

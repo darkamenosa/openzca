@@ -171,3 +171,53 @@ test("findFriends supports simple glob patterns", { concurrency: false }, async 
   assert.equal(prefixRows.length, 1);
   assert.equal(prefixRows[0].userId, "u1");
 });
+
+test("getDb reopens after a worker starts closing", { concurrency: false }, async (t) => {
+  const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-db-test-"));
+  const profile = "test-profile";
+  const db = await loadDbModule(tempHome);
+
+  t.after(async () => {
+    delete process.env.OPENZCA_HOME;
+    try {
+      await db.closeDb(profile);
+    } catch {
+      // ignore cleanup failures in test teardown
+    }
+    await fs.rm(tempHome, { recursive: true, force: true });
+  });
+
+  await db.enableDb(profile);
+  const firstHandle = await db.getDb(profile);
+  const closing = firstHandle.close();
+  const reopenedHandle = await db.getDb(profile);
+
+  assert.notEqual(reopenedHandle, firstHandle);
+
+  await closing;
+  await db.persistFriend({
+    profile,
+    userId: "u1",
+    displayName: "Alice",
+  });
+
+  const rows = await db.findFriends({ profile, query: "alice" });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].userId, "u1");
+});
+
+test("Database.close is idempotent", { concurrency: false }, async (t) => {
+  const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-db-test-"));
+  const profile = "test-profile";
+  const db = await loadDbModule(tempHome);
+
+  t.after(async () => {
+    delete process.env.OPENZCA_HOME;
+    await fs.rm(tempHome, { recursive: true, force: true });
+  });
+
+  await db.enableDb(profile);
+  const handle = await db.getDb(profile);
+
+  await Promise.all([handle.close(), handle.close()]);
+});
