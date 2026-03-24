@@ -99,7 +99,13 @@ import {
   hasPotentialOutboundGroupMention,
   type GroupMentionMember,
 } from "./lib/group-mentions.js";
-import { analyzeTextSendPayload, buildTextSendPayload } from "./lib/text-send.js";
+import {
+  analyzeTextSendPayload,
+  buildTextSendPayload,
+  planTextSendPayloadsForDelivery,
+  ZALO_TEXT_MESSAGE_MAX_LENGTH,
+  ZALO_TEXT_REQUEST_PARAMS_MAX_ESTIMATE,
+} from "./lib/text-send.js";
 import { parseTextStyles } from "./lib/text-styles.js";
 import { isFfmpegAvailable, planVideoSendMode, sendNativeVideo } from "./lib/video-send.js";
 import { prepareReplyMessage, prepareStoredReplyMessage } from "./lib/reply.js";
@@ -4987,20 +4993,80 @@ msg
               ...(quote ? { quote } : {}),
             }
           : textPayload;
-      const response = await api.sendMessage(payload, threadId, threadType);
+
+      const deliveryPlan = planTextSendPayloadsForDelivery({
+        payload: textPayload,
+        threadType,
+        threadId,
+        maxMessageLength: parsePositiveIntFromEnv(
+          "OPENZCA_TEXT_MESSAGE_MAX_LENGTH",
+          ZALO_TEXT_MESSAGE_MAX_LENGTH,
+        ),
+        maxRequestParamsLengthEstimate: parsePositiveIntFromEnv(
+          "OPENZCA_TEXT_REQUEST_PARAMS_MAX_ESTIMATE",
+          ZALO_TEXT_REQUEST_PARAMS_MAX_ESTIMATE,
+        ),
+      });
+      const payloadChunks = deliveryPlan.chunks;
+      const responses: Array<Awaited<ReturnType<typeof api.sendMessage>>> = [];
+      const sentPayloads: Array<typeof payload> = [];
+      for (let index = 0; index < payloadChunks.length; index += 1) {
+        const chunk = payloadChunks[index];
+        const chunkPayload =
+          quote && index === 0
+            ? {
+                ...(typeof chunk === "string" ? { msg: chunk } : chunk),
+                quote,
+              }
+            : chunk;
+        sentPayloads.push(chunkPayload);
+        responses.push(await api.sendMessage(chunkPayload, threadId, threadType));
+      }
+
+      const response =
+        responses.length === 1
+          ? responses[0]
+          : {
+              chunked: true,
+              chunkCount: responses.length,
+              msgId: responses
+                .at(-1)
+                ?.message?.msgId
+                ?.toString(),
+              response: responses,
+            };
+
       output(response, false);
       if (await shouldWriteToDb(profile)) {
         scheduleDbWrite(profile, command, "msg.send.db.persist_error", async () => {
-          await persistOutgoingMessageBestEffort({
-            profile,
-            api,
-            threadId,
-            group: opts.group,
-            text: message,
-            msgType: "text",
-            response,
-            rawPayload: payload,
-          });
+          if (payloadChunks.length === 1) {
+            await persistOutgoingMessageBestEffort({
+              profile,
+              api,
+              threadId,
+              group: opts.group,
+              text: message,
+              msgType: "text",
+              response,
+              rawPayload: payload,
+            });
+            return;
+          }
+
+          for (let index = 0; index < payloadChunks.length; index += 1) {
+            const chunk = sentPayloads[index];
+            const chunkText = typeof chunk === "string" ? chunk : chunk.msg;
+            await persistOutgoingMessageBestEffort({
+              profile,
+              api,
+              threadId,
+              group: opts.group,
+              text: chunkText,
+              msgType: "text",
+              response: responses[index],
+              rawPayload: chunk,
+            });
+          }
         });
       }
     }),

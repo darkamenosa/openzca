@@ -127,6 +127,7 @@ Media commands accept local files, `file://` paths, and repeatable `--url` optio
 `openzca msg video` attempts native video send for a single `.mp4` input by uploading the video and thumbnail to Zalo first. If `ffmpeg` is unavailable, the input is not a single `.mp4`, or native send fails, it falls back to the normal attachment send path. Use `--thumbnail <path-or-url>` to supply the preview image explicitly.
 Local paths using `~` are expanded automatically (for positional file args, `--url`, and `OPENZCA_LISTEN_MEDIA_DIR`).
 Group text sends via `openzca msg send --group` resolve unique `@Name` or `@userId` mentions against the current group member list using member ids, display names, and usernames. Mention offsets are computed after formatting markers are parsed, so messages like `**@Alice Nguyen** hello` work. If multiple members share the same label, the command fails instead of guessing.
+When formatted text would produce an oversized outbound payload, `openzca msg send` automatically splits it into multiple sequential text messages using the final outbound text and rebased style/mention offsets. The split happens after formatting is parsed, using both rendered text length and estimated request payload size rather than the raw input string.
 Use `openzca msg analyze-text ... --json` when you need to predict whether a formatted reply will expand into a large `textProperties` payload before attempting delivery.
 Reply flows:
 
@@ -391,6 +392,10 @@ Listener resilience override:
 - `OPENZCA_RECENT_GROUP_MAX_PAGES`: max websocket history pages to scan for `msg recent -g` when direct group-history path fails.
   - Default: `20`.
   - Increase if a group thread is old and not found quickly.
+- `OPENZCA_TEXT_MESSAGE_MAX_LENGTH`: max rendered characters allowed per outbound text chunk before `msg send` splits it.
+  - Default: `2000`.
+- `OPENZCA_TEXT_REQUEST_PARAMS_MAX_ESTIMATE`: max estimated serialized request size allowed per outbound text chunk before `msg send` splits it.
+  - Default: `4000`.
 - `OPENZCA_LISTEN_ENFORCE_SINGLE_OWNER`: enforce one `listen` owner process per profile.
   - Default: enabled.
   - Set to `0` to allow multiple listeners on the same profile (not recommended).
