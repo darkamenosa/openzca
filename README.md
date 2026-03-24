@@ -48,6 +48,9 @@ openzca msg send USER_ID "Reply text" --reply-id MSG_ID
 # Reply without DB using a listen --raw payload
 openzca msg send USER_ID "Reply text" --reply-message '{"threadId":"...","msgId":"...","cliMsgId":"...","content":"...","msgType":"webchat","senderId":"...","toId":"...","ts":"..."}'
 
+# Inspect how a formatted message expands before sending/chunking
+openzca msg analyze-text GROUP_ID "- item one\n- item two" --group --json
+
 # Listen for incoming messages
 openzca listen
 
@@ -100,6 +103,7 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 | Command | Description |
 |---------|-------------|
 | `openzca msg send <threadId> <message>` | Send text with formatting (`**bold**`, `*italic*`, `~~strike~~`, etc.), group @mention resolution (`--raw` to skip formatting), and quote replies via `--reply-id` or `--reply-message` |
+| `openzca msg analyze-text <threadId> <message>` | Build and inspect the exact text payload `msg send` would hand to `zca-js`, including rendered text length, style count, mention count, `textProperties` size, and request size estimate |
 | `openzca msg image <threadId> [file]` | Send image(s) from file or URL |
 | `openzca msg video <threadId> [file]` | Send video(s) from file or URL; single `.mp4` inputs try native video mode |
 | `openzca msg voice <threadId> [file]` | Send voice message from local file or URL (`.aac`, `.mp3`, `.m4a`, `.wav`, `.ogg`) |
@@ -123,6 +127,7 @@ Media commands accept local files, `file://` paths, and repeatable `--url` optio
 `openzca msg video` attempts native video send for a single `.mp4` input by uploading the video and thumbnail to Zalo first. If `ffmpeg` is unavailable, the input is not a single `.mp4`, or native send fails, it falls back to the normal attachment send path. Use `--thumbnail <path-or-url>` to supply the preview image explicitly.
 Local paths using `~` are expanded automatically (for positional file args, `--url`, and `OPENZCA_LISTEN_MEDIA_DIR`).
 Group text sends via `openzca msg send --group` resolve unique `@Name` or `@userId` mentions against the current group member list using member ids, display names, and usernames. Mention offsets are computed after formatting markers are parsed, so messages like `**@Alice Nguyen** hello` work. If multiple members share the same label, the command fails instead of guessing.
+Use `openzca msg analyze-text ... --json` when you need to predict whether a formatted reply will expand into a large `textProperties` payload before attempting delivery.
 Reply flows:
 
 - `--reply-id <id>` resolves a stored message from the local DB by `msgId`, `cliMsgId`, or internal message uid. This requires DB persistence to be enabled for the profile.

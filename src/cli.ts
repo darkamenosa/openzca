@@ -96,9 +96,11 @@ import {
 } from "./lib/group-poll.js";
 import { parseDurationInput, parseTimeBoundaryInput } from "./lib/time-range.js";
 import {
+  hasPotentialOutboundGroupMention,
   type GroupMentionMember,
 } from "./lib/group-mentions.js";
-import { buildTextSendPayload } from "./lib/text-send.js";
+import { analyzeTextSendPayload, buildTextSendPayload } from "./lib/text-send.js";
+import { parseTextStyles } from "./lib/text-styles.js";
 import { isFfmpegAvailable, planVideoSendMode, sendNativeVideo } from "./lib/video-send.js";
 import { prepareReplyMessage, prepareStoredReplyMessage } from "./lib/reply.js";
 
@@ -5001,6 +5003,39 @@ msg
           });
         });
       }
+    }),
+  );
+
+msg
+  .command("analyze-text <threadId> <message>")
+  .option("-g, --group", "Analyze as group text")
+  .option("--raw", "Analyze raw text without parsing formatting markers")
+  .option("-j, --json", "JSON output")
+  .description("Build and analyze the exact text payload that msg send would hand to zca-js. Useful for pre-send chunking/debugging.")
+  .action(
+    wrapAction(async (
+      threadId: string,
+      message: string,
+      opts: { group?: boolean; raw?: boolean; json?: boolean },
+      command: Command,
+    ) => {
+      const threadType = asThreadType(opts.group);
+      const mentionProbeText = opts.raw ? message : parseTextStyles(message).text;
+      let listGroupMembers: ((threadId: string) => Promise<GroupMentionMember[]>) | undefined;
+
+      if (threadType === ThreadType.Group && hasPotentialOutboundGroupMention(mentionProbeText)) {
+        const { api } = await requireApi(command);
+        listGroupMembers = (groupId) => listGroupMentionMembers(api, groupId);
+      }
+
+      const analysis = await analyzeTextSendPayload({
+        message,
+        raw: opts.raw,
+        threadType,
+        threadId,
+        listGroupMembers,
+      });
+      output(analysis, shouldOutputJson(opts));
     }),
   );
 
