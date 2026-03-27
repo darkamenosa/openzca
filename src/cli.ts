@@ -1675,6 +1675,25 @@ async function persistLiveDmContact(params: {
   });
 }
 
+function extractGroupTitle(record: Record<string, unknown> | undefined): string | undefined {
+  if (!record) {
+    return undefined;
+  }
+  return typeof record.name === "string" && record.name.trim()
+    ? record.name.trim()
+    : typeof record.groupName === "string" && record.groupName.trim()
+      ? record.groupName.trim()
+      : undefined;
+}
+
+async function findGroupDirectoryEntry(api: API, groupId: string): Promise<Record<string, unknown> | undefined> {
+  const groups = await buildGroupsDetailed(api);
+  return groups.find((item) => {
+    const record = item as Record<string, unknown>;
+    return normalizeCachedId(record.groupId ?? record.grid ?? record.threadId ?? record.id) === groupId;
+  }) as Record<string, unknown> | undefined;
+}
+
 async function hydrateUnknownLiveGroup(params: {
   profile: string;
   api: API;
@@ -1690,15 +1709,30 @@ async function hydrateUnknownLiveGroup(params: {
     return;
   }
 
+  let group: Record<string, unknown> | undefined;
+  let title = params.fallbackTitle?.trim() || undefined;
+
   try {
     const info = await params.api.getGroupInfo(params.groupId);
-    const group = info.gridInfoMap[params.groupId] as Record<string, unknown> | undefined;
-    const title =
-      typeof group?.name === "string" && group.name.trim()
-        ? group.name.trim()
-        : typeof group?.groupName === "string" && group.groupName.trim()
-          ? group.groupName.trim()
-          : params.fallbackTitle?.trim() || undefined;
+    group = info.gridInfoMap[params.groupId] as Record<string, unknown> | undefined;
+    title = extractGroupTitle(group) ?? title;
+  } catch {
+    // Fall through to the directory fallback below.
+  }
+
+  if (!group || !title) {
+    try {
+      const directoryGroup = await findGroupDirectoryEntry(params.api, params.groupId);
+      if (directoryGroup) {
+        group = group ?? directoryGroup;
+        title = extractGroupTitle(directoryGroup) ?? title;
+      }
+    } catch {
+      // Best-effort fallback only.
+    }
+  }
+
+  if (group || title) {
     await persistThread({
       profile: params.profile,
       scopeThreadId: params.groupId,
@@ -1707,17 +1741,23 @@ async function hydrateUnknownLiveGroup(params: {
       title,
       rawJson: group ? JSON.stringify(group) : undefined,
     });
-    await persistGroupMembersSnapshot(params.profile, params.groupId, params.api);
-  } catch {
-    if (params.fallbackTitle?.trim()) {
-      await persistThread({
-        profile: params.profile,
-        scopeThreadId: params.groupId,
-        rawThreadId: params.groupId,
-        threadType: "group",
-        title: params.fallbackTitle.trim(),
-      });
+
+    try {
+      await persistGroupMembersSnapshot(params.profile, params.groupId, params.api);
+    } catch {
+      // Keep the stored title even if member hydration fails.
     }
+    return;
+  }
+
+  if (params.fallbackTitle?.trim()) {
+    await persistThread({
+      profile: params.profile,
+      scopeThreadId: params.groupId,
+      rawThreadId: params.groupId,
+      threadType: "group",
+      title: params.fallbackTitle.trim(),
+    });
   }
 }
 
@@ -1997,147 +2037,151 @@ async function runDbSync(params: {
   progress?: SyncProgressReporter;
 }): Promise<DbSyncSummary> {
   const { profile, api } = await requireApi(params.command);
-  const dbPath = await resolveDbPath(profile);
-  params.progress?.(`starting sync for profile ${profile}`);
-  const summary = createDbSyncSummary(
-    profile,
-    dbPath,
-    params.mode === "all" || params.mode === "chats" || params.mode === "chat" ? params.count : undefined,
-  );
-  const selfId = api.getOwnId();
-  const selfInfo = normalizeMeInfoOutput(await api.fetchAccountInfo());
-  await persistSelfProfile({
-    profile,
-    userId: selfId,
-    displayName:
-      typeof selfInfo.displayName === "string" && selfInfo.displayName.trim()
-        ? selfInfo.displayName.trim()
-        : undefined,
-    infoJson: JSON.stringify(selfInfo),
-  });
-  const { pinnedIds, hiddenIds } = await collectConversationIds(api);
-
-  let friendNames = new Map<string, string>();
-
-  if (params.mode === "all" || params.mode === "friends" || params.mode === "chats") {
-    friendNames = await syncDbFriendDirectory({
+  try {
+    const dbPath = await resolveDbPath(profile);
+    params.progress?.(`starting sync for profile ${profile}`);
+    const summary = createDbSyncSummary(
       profile,
-      api,
-      summary,
-      progress: params.progress,
+      dbPath,
+      params.mode === "all" || params.mode === "chats" || params.mode === "chat" ? params.count : undefined,
+    );
+    const selfId = api.getOwnId();
+    const selfInfo = normalizeMeInfoOutput(await api.fetchAccountInfo());
+    await persistSelfProfile({
+      profile,
+      userId: selfId,
+      displayName:
+        typeof selfInfo.displayName === "string" && selfInfo.displayName.trim()
+          ? selfInfo.displayName.trim()
+          : undefined,
+      infoJson: JSON.stringify(selfInfo),
     });
-  }
+    const { pinnedIds, hiddenIds } = await collectConversationIds(api);
 
-  if (params.mode === "all" || params.mode === "groups") {
-    const groups = await buildGroupsDetailed(api);
-    const targetGroupIds = new Set<string>();
-    const titleById = new Map<string, string | undefined>();
-    for (const group of groups) {
-      const record = group as Record<string, unknown>;
-      const groupId = normalizeCachedId(record.groupId);
-      if (!groupId) continue;
+    let friendNames = new Map<string, string>();
+
+    if (params.mode === "all" || params.mode === "friends" || params.mode === "chats") {
+      friendNames = await syncDbFriendDirectory({
+        profile,
+        api,
+        summary,
+        progress: params.progress,
+      });
+    }
+
+    if (params.mode === "all" || params.mode === "groups") {
+      const groups = await buildGroupsDetailed(api);
+      const targetGroupIds = new Set<string>();
+      const titleById = new Map<string, string | undefined>();
+      for (const group of groups) {
+        const record = group as Record<string, unknown>;
+        const groupId = normalizeCachedId(record.groupId);
+        if (!groupId) continue;
+        const title =
+          typeof record.name === "string" && record.name.trim()
+            ? record.name.trim()
+          : typeof record.groupName === "string" && record.groupName.trim()
+              ? record.groupName.trim()
+              : undefined;
+        targetGroupIds.add(groupId);
+        titleById.set(groupId, title);
+        await prepareDbGroupTarget({
+          profile,
+          api,
+          groupId,
+          title,
+          rawJson: JSON.stringify(group),
+          pinnedIds,
+          hiddenIds,
+        });
+      }
+      await syncDbGroupHistoryFull({
+        profile,
+        api,
+        selfId,
+        targetGroupIds,
+        titleById,
+        summary,
+        progress: params.progress,
+      });
+    }
+
+    if (params.mode === "group") {
+      if (!params.groupId) {
+        throw new Error("Missing group id for db sync group.");
+      }
+      const groupInfo = await api.getGroupInfo(params.groupId);
+      const group = groupInfo.gridInfoMap[params.groupId] as Record<string, unknown> | undefined;
       const title =
-        typeof record.name === "string" && record.name.trim()
-          ? record.name.trim()
-        : typeof record.groupName === "string" && record.groupName.trim()
-            ? record.groupName.trim()
-            : undefined;
-      targetGroupIds.add(groupId);
-      titleById.set(groupId, title);
+        typeof group?.name === "string" && group.name.trim()
+          ? group.name.trim()
+          : undefined;
       await prepareDbGroupTarget({
         profile,
         api,
-        groupId,
+        groupId: params.groupId,
         title,
-        rawJson: JSON.stringify(group),
+        rawJson: group ? JSON.stringify(group) : undefined,
         pinnedIds,
         hiddenIds,
       });
+      await syncDbGroupHistoryFull({
+        profile,
+        api,
+        selfId,
+        targetGroupIds: new Set([params.groupId]),
+        titleById: new Map([[params.groupId, title]]),
+        summary,
+        progress: params.progress,
+      });
     }
-    await syncDbGroupHistoryFull({
-      profile,
-      api,
-      selfId,
-      targetGroupIds,
-      titleById,
-      summary,
-      progress: params.progress,
-    });
+
+    if (params.mode === "chat") {
+      if (!params.threadId) {
+        throw new Error("Missing chat id for db sync chat.");
+      }
+      if (friendNames.size === 0) {
+        friendNames = await persistFriendDirectory(profile, api);
+      }
+      await syncDbChatThread({
+        profile,
+        api,
+        selfId,
+        threadId: params.threadId,
+        count: params.count,
+        title: friendNames.get(params.threadId),
+        pinnedIds,
+        hiddenIds,
+        summary,
+        progress: params.progress,
+      });
+    }
+
+    if (params.mode === "all" || params.mode === "chats") {
+      if (friendNames.size === 0) {
+        friendNames = await persistFriendDirectory(profile, api);
+      }
+      await syncDbChatsBestEffort({
+        profile,
+        api,
+        selfId,
+        count: params.count,
+        titleById: friendNames,
+        pinnedIds,
+        hiddenIds,
+        summary,
+        progress: params.progress,
+      });
+    }
+
+    params.progress?.(
+      `done: groups=${summary.groupsSynced}, groupMessages=${summary.groupMessagesImported}, friends=${summary.friendsSynced}, chats=${summary.chatsSynced}, dmMessages=${summary.dmMessagesImported}`,
+    );
+
+    return summary;
+  } finally {
+    await closeDb(profile);
   }
-
-  if (params.mode === "group") {
-    if (!params.groupId) {
-      throw new Error("Missing group id for db sync group.");
-    }
-    const groupInfo = await api.getGroupInfo(params.groupId);
-    const group = groupInfo.gridInfoMap[params.groupId] as Record<string, unknown> | undefined;
-    const title =
-      typeof group?.name === "string" && group.name.trim()
-        ? group.name.trim()
-        : undefined;
-    await prepareDbGroupTarget({
-      profile,
-      api,
-      groupId: params.groupId,
-      title,
-      rawJson: group ? JSON.stringify(group) : undefined,
-      pinnedIds,
-      hiddenIds,
-    });
-    await syncDbGroupHistoryFull({
-      profile,
-      api,
-      selfId,
-      targetGroupIds: new Set([params.groupId]),
-      titleById: new Map([[params.groupId, title]]),
-      summary,
-      progress: params.progress,
-    });
-  }
-
-  if (params.mode === "chat") {
-    if (!params.threadId) {
-      throw new Error("Missing chat id for db sync chat.");
-    }
-    if (friendNames.size === 0) {
-      friendNames = await persistFriendDirectory(profile, api);
-    }
-    await syncDbChatThread({
-      profile,
-      api,
-      selfId,
-      threadId: params.threadId,
-      count: params.count,
-      title: friendNames.get(params.threadId),
-      pinnedIds,
-      hiddenIds,
-      summary,
-      progress: params.progress,
-    });
-  }
-
-  if (params.mode === "all" || params.mode === "chats") {
-    if (friendNames.size === 0) {
-      friendNames = await persistFriendDirectory(profile, api);
-    }
-    await syncDbChatsBestEffort({
-      profile,
-      api,
-      selfId,
-      count: params.count,
-      titleById: friendNames,
-      pinnedIds,
-      hiddenIds,
-      summary,
-      progress: params.progress,
-    });
-  }
-
-  params.progress?.(
-    `done: groups=${summary.groupsSynced}, groupMessages=${summary.groupMessagesImported}, friends=${summary.friendsSynced}, chats=${summary.chatsSynced}, dmMessages=${summary.dmMessagesImported}`,
-  );
-
-  return summary;
 }
 
 async function buildGroupsDetailed(api: API): Promise<any[]> {
