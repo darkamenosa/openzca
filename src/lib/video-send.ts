@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { ThreadType, type API } from "zca-js";
+import { getSendRetryConfigFromEnv, retryable } from "./send-retry.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -222,8 +223,9 @@ export async function sendNativeVideo(params: {
   try {
     const uploadedVideo = await params.api.uploadAttachment([params.videoPath], params.threadId, params.threadType);
     const uploadedThumbnail = await params.api.uploadAttachment([thumbnailPath], params.threadId, params.threadType);
+    const sendVideo = retryable(params.api.sendVideo.bind(params.api), getSendRetryConfigFromEnv());
 
-    return await params.api.sendVideo(
+    return await sendVideo(
       {
         msg: params.message ?? "",
         videoUrl: pickUploadedVideoUrl(uploadedVideo[0]),

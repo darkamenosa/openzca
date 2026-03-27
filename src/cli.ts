@@ -113,6 +113,7 @@ import {
 import { parseTextStyles } from "./lib/text-styles.js";
 import { isFfmpegAvailable, planVideoSendMode, sendNativeVideo } from "./lib/video-send.js";
 import { prepareReplyMessage, prepareStoredReplyMessage } from "./lib/reply.js";
+import { getSendRetryConfigFromEnv, retryable } from "./lib/send-retry.js";
 
 const program = new Command();
 
@@ -423,6 +424,30 @@ function parsePositiveIntFromUnknown(value: unknown): number | null {
   return null;
 }
 
+function retrySendMethod<TArgs extends unknown[], TResult>(
+  operation: (...args: TArgs) => Promise<TResult>,
+  command: Command | undefined,
+  metaBuilder: (...args: TArgs) => Record<string, unknown>,
+): (...args: TArgs) => Promise<TResult> {
+  const config = getSendRetryConfigFromEnv();
+  return retryable(operation, {
+    ...config,
+    onRetry: ({ attempt, maxRetries, delayMs, error, args }) => {
+      writeDebugLine(
+        "send.retry",
+        {
+          ...metaBuilder(...args),
+          attempt,
+          maxRetries,
+          delayMs,
+          message: error instanceof Error ? error.message : String(error),
+        },
+        command,
+      );
+    },
+  });
+}
+
 function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -601,6 +626,15 @@ async function startListenerIpcServer(
       const threadType = parsed.threadType === "group" ? ThreadType.Group : ThreadType.User;
       const requestTimeoutMs =
         parsePositiveIntFromUnknown(parsed.uploadTimeoutMs) ?? uploadTimeoutMs;
+      const sendMessage = retrySendMethod(
+        api.sendMessage.bind(api),
+        command,
+        (_payload, threadId, threadTypeArg) => ({
+          kind: "listen.ipc.upload",
+          threadId,
+          threadType: threadTypeArg === ThreadType.Group ? "group" : "user",
+        }),
+      );
 
       writeDebugLine(
         "listen.ipc.upload.start",
@@ -618,7 +652,7 @@ async function startListenerIpcServer(
 
       try {
         const response = await withTimeout(
-          api.sendMessage(
+          sendMessage(
             {
               msg: "",
               attachments: parsed.attachments,
@@ -5285,6 +5319,15 @@ msg
         ),
       });
       const payloadChunks = deliveryPlan.chunks;
+      const sendMessage = retrySendMethod(
+        api.sendMessage.bind(api),
+        command,
+        (_payload, targetThreadId, targetThreadType) => ({
+          kind: "msg.send",
+          threadId: targetThreadId,
+          threadType: targetThreadType === ThreadType.Group ? "group" : "user",
+        }),
+      );
       const responses: Array<Awaited<ReturnType<typeof api.sendMessage>>> = [];
       const sentPayloads: Array<typeof payload> = [];
       for (let index = 0; index < payloadChunks.length; index += 1) {
@@ -5297,7 +5340,7 @@ msg
               }
             : chunk;
         sentPayloads.push(chunkPayload);
-        responses.push(await api.sendMessage(chunkPayload, threadId, threadType));
+        responses.push(await sendMessage(chunkPayload, threadId, threadType));
       }
 
       const response =
@@ -5397,6 +5440,19 @@ msg
         command: Command,
       ) => {
         const { api, profile } = await requireApi(command);
+        const sendMessage = retrySendMethod(
+          api.sendMessage.bind(api),
+          command,
+          (payload, targetThreadId, targetThreadType) => ({
+            kind: "msg.image",
+            threadId: targetThreadId,
+            threadType: targetThreadType === ThreadType.Group ? "group" : "user",
+            attachmentCount:
+              payload && typeof payload === "object" && Array.isArray((payload as { attachments?: unknown[] }).attachments)
+                ? (payload as { attachments: unknown[] }).attachments.length
+                : undefined,
+          }),
+        );
 
         const normalizedFile = file ? normalizeMediaInput(file) : undefined;
         const files = [normalizedFile, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
@@ -5421,7 +5477,7 @@ msg
           }
           await assertFilesExist(attachments);
 
-          const response = await api.sendMessage(
+          const response = await sendMessage(
             {
               msg: opts.message ?? "",
               attachments,
@@ -5477,6 +5533,19 @@ msg
       ) => {
         const { api, profile } = await requireApi(command);
         const threadType = asThreadType(opts.group);
+        const sendMessage = retrySendMethod(
+          api.sendMessage.bind(api),
+          command,
+          (payload, targetThreadId, targetThreadType) => ({
+            kind: "msg.video.fallback",
+            threadId: targetThreadId,
+            threadType: targetThreadType === ThreadType.Group ? "group" : "user",
+            attachmentCount:
+              payload && typeof payload === "object" && Array.isArray((payload as { attachments?: unknown[] }).attachments)
+                ? (payload as { attachments: unknown[] }).attachments.length
+                : undefined,
+          }),
+        );
 
         const normalizedFile = file ? normalizeMediaInput(file) : undefined;
         const files = [normalizedFile, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
@@ -5605,7 +5674,7 @@ msg
           }
 
           const response = await withUploadListener(api, command, async () =>
-            api.sendMessage(
+            sendMessage(
               {
                 msg: opts.message ?? "",
                 attachments,
@@ -5661,6 +5730,15 @@ msg
       ) => {
         const { api, profile } = await requireApi(command);
         const type = asThreadType(opts.group);
+        const sendVoice = retrySendMethod(
+          api.sendVoice.bind(api),
+          command,
+          (_payload, targetThreadId, targetThreadType) => ({
+            kind: "msg.voice",
+            threadId: targetThreadId,
+            threadType: targetThreadType === ThreadType.Group ? "group" : "user",
+          }),
+        );
 
         const normalizedFile = file ? normalizeMediaInput(file) : undefined;
         const files = [normalizedFile, ...normalizeInputList(opts.url)].filter(Boolean) as string[];
@@ -5689,7 +5767,7 @@ msg
           const uploaded = await api.uploadAttachment(attachments, threadId, type);
           for (const item of uploaded) {
             if (item.fileType === "others" || item.fileType === "video") {
-              results.push(await api.sendVoice({ voiceUrl: item.fileUrl }, threadId, type));
+              results.push(await sendVoice({ voiceUrl: item.fileUrl }, threadId, type));
             }
           }
 
@@ -5768,7 +5846,16 @@ msg
   .action(
     wrapAction(async (threadId: string, url: string, opts: { group?: boolean }, command: Command) => {
       const { api, profile } = await requireApi(command);
-      const response = await api.sendLink({ link: url }, threadId, asThreadType(opts.group));
+      const sendLink = retrySendMethod(
+        api.sendLink.bind(api),
+        command,
+        (_payload, targetThreadId, targetThreadType) => ({
+          kind: "msg.link",
+          threadId: targetThreadId,
+          threadType: targetThreadType === ThreadType.Group ? "group" : "user",
+        }),
+      );
+      const response = await sendLink({ link: url }, threadId, asThreadType(opts.group));
       output(response, false);
       if (await shouldWriteToDb(profile)) {
         scheduleDbWrite(profile, command, "msg.link.db.persist_error", async () => {
@@ -5953,6 +6040,15 @@ msg
       ) => {
         const { api } = await requireApi(command);
         const type = asThreadType(opts.group);
+        const sendMessage = retrySendMethod(
+          api.sendMessage.bind(api),
+          command,
+          (_payload, targetThreadId, targetThreadType) => ({
+            kind: "msg.edit.resend",
+            threadId: targetThreadId,
+            threadType: targetThreadType === ThreadType.Group ? "group" : "user",
+          }),
+        );
         const undoResponse = await api.undo(
           {
             msgId,
@@ -5961,7 +6057,7 @@ msg
           threadId,
           type,
         );
-        const sendResponse = await api.sendMessage(message, threadId, type);
+        const sendResponse = await sendMessage(message, threadId, type);
         output(
           {
             mode: "undo+send",
@@ -5989,6 +6085,19 @@ msg
         command: Command,
       ) => {
         const { api, profile } = await requireApi(command);
+        const sendMessage = retrySendMethod(
+          api.sendMessage.bind(api),
+          command,
+          (payload, targetThreadId, targetThreadType) => ({
+            kind: "msg.upload",
+            threadId: targetThreadId,
+            threadType: targetThreadType === ThreadType.Group ? "group" : "user",
+            attachmentCount:
+              payload && typeof payload === "object" && Array.isArray((payload as { attachments?: unknown[] }).attachments)
+                ? (payload as { attachments: unknown[] }).attachments.length
+                : undefined,
+          }),
+        );
         const inputs = normalizeInputList(opts.url);
         const urlInputs = inputs.filter((entry) => isHttpUrl(entry));
         const localInputs = inputs.filter((entry) => !isHttpUrl(entry));
@@ -6070,7 +6179,7 @@ msg
           }
 
           const response = await withUploadListener(api, command, async () =>
-            api.sendMessage(
+            sendMessage(
               {
                 msg: "",
                 attachments,
@@ -7680,12 +7789,17 @@ program
           await emitWebhook(payload);
 
           if (opts.echo && rawText.trim().length > 0) {
+            const sendMessage = retrySendMethod(
+              api.sendMessage.bind(api),
+              command,
+              (_sendPayload, targetThreadId, targetThreadType) => ({
+                kind: "listen.echo",
+                threadId: targetThreadId,
+                threadType: targetThreadType === ThreadType.Group ? "group" : "user",
+              }),
+            );
             try {
-              await api.sendMessage(
-                { msg: processedText },
-                message.threadId,
-                message.type,
-              );
+              await sendMessage({ msg: processedText }, message.threadId, message.type);
             } catch (error) {
               console.error(
                 `Echo failed: ${error instanceof Error ? error.message : String(error)}`,
