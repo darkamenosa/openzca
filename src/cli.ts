@@ -114,6 +114,7 @@ import { parseTextStyles } from "./lib/text-styles.js";
 import { isFfmpegAvailable, planVideoSendMode, sendNativeVideo } from "./lib/video-send.js";
 import { prepareReplyMessage, prepareStoredReplyMessage } from "./lib/reply.js";
 import { getSendRetryConfigFromEnv, retryable } from "./lib/send-retry.js";
+import { fetchAdaptiveObjectBatches } from "./lib/adaptive-batch.js";
 
 const program = new Command();
 
@@ -446,6 +447,75 @@ function retrySendMethod<TArgs extends unknown[], TResult>(
       );
     },
   });
+}
+
+const LOOKUP_BATCH_SIZE = 5;
+const LOOKUP_RETRY_COUNT = 2;
+const LOOKUP_RETRY_DELAY_MS = 400;
+const LOOKUP_BATCH_DELAY_MS = 75;
+
+async function fetchGroupInfoRecords(
+  api: API,
+  groupIds: readonly string[],
+): Promise<Map<string, Record<string, unknown>>> {
+  const { values } = await fetchAdaptiveObjectBatches<Record<string, unknown>>(groupIds, {
+    fetchBatch: async (keys) => {
+      const response = await api.getGroupInfo(keys);
+      return (response.gridInfoMap ?? {}) as Record<string, Record<string, unknown> | undefined>;
+    },
+    initialBatchSize: LOOKUP_BATCH_SIZE,
+    maxRetries: LOOKUP_RETRY_COUNT,
+    retryDelayMs: LOOKUP_RETRY_DELAY_MS,
+    batchDelayMs: LOOKUP_BATCH_DELAY_MS,
+  });
+  return values;
+}
+
+async function fetchGroupInfoRecord(
+  api: API,
+  groupId: string,
+): Promise<Record<string, unknown>> {
+  const groups = await fetchGroupInfoRecords(api, [groupId]);
+  const group = groups.get(groupId);
+  if (!group) {
+    throw new Error(`Group not found: ${groupId}`);
+  }
+  return group;
+}
+
+async function fetchGroupMemberProfiles(
+  api: API,
+  memberIds: readonly string[],
+): Promise<Map<string, {
+  id?: string;
+  displayName?: string;
+  zaloName?: string;
+  avatar?: string;
+  accountStatus?: number;
+}>> {
+  const { values } = await fetchAdaptiveObjectBatches<{
+    id?: string;
+    displayName?: string;
+    zaloName?: string;
+    avatar?: string;
+    accountStatus?: number;
+  }>(memberIds, {
+    fetchBatch: async (keys) => {
+      const response = await api.getGroupMembersInfo(keys);
+      return (response.profiles ?? {}) as Record<string, {
+        id?: string;
+        displayName?: string;
+        zaloName?: string;
+        avatar?: string;
+        accountStatus?: number;
+      } | undefined>;
+    },
+    initialBatchSize: LOOKUP_BATCH_SIZE,
+    maxRetries: LOOKUP_RETRY_COUNT,
+    retryDelayMs: LOOKUP_RETRY_DELAY_MS,
+    batchDelayMs: LOOKUP_BATCH_DELAY_MS,
+  });
+  return values;
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -1313,8 +1383,9 @@ async function persistGroupMembersSnapshot(
   profile: string,
   groupId: string,
   api: API,
+  groupInfo?: Record<string, unknown>,
 ): Promise<void> {
-  const rows = await listGroupMemberRows(api, groupId);
+  const rows = await listGroupMemberRows(api, groupId, groupInfo);
   const snapshotAtMs = Date.now();
   for (const row of rows) {
     await persistContact({
@@ -1593,11 +1664,13 @@ async function prepareDbGroupTarget(params: {
   profile: string;
   api: API;
   groupId: string;
+  group?: Record<string, unknown>;
   title?: string;
   rawJson?: string;
   pinnedIds: Set<string>;
   hiddenIds: Set<string>;
-}): Promise<void> {
+  hydrateMembers?: boolean;
+}): Promise<{ memberSnapshotError?: string }> {
   await persistThread({
     profile: params.profile,
     scopeThreadId: params.groupId,
@@ -1608,7 +1681,15 @@ async function prepareDbGroupTarget(params: {
     isHidden: params.hiddenIds.has(params.groupId),
     rawJson: params.rawJson,
   });
-  await persistGroupMembersSnapshot(params.profile, params.groupId, params.api);
+  if (params.hydrateMembers === false) {
+    return {};
+  }
+  try {
+    await persistGroupMembersSnapshot(params.profile, params.groupId, params.api, params.group);
+    return {};
+  } catch (error) {
+    return { memberSnapshotError: toErrorText(error) };
+  }
 }
 
 function resolveContactDisplayName(params: {
@@ -1767,20 +1848,17 @@ async function hydrateUnknownLiveGroup(params: {
   }
 
   if (group || title) {
-    await persistThread({
+    await prepareDbGroupTarget({
       profile: params.profile,
-      scopeThreadId: params.groupId,
-      rawThreadId: params.groupId,
-      threadType: "group",
+      api: params.api,
+      groupId: params.groupId,
+      group,
       title,
       rawJson: group ? JSON.stringify(group) : undefined,
+      pinnedIds: new Set<string>(),
+      hiddenIds: new Set<string>(),
+      hydrateMembers: Boolean(group),
     });
-
-    try {
-      await persistGroupMembersSnapshot(params.profile, params.groupId, params.api);
-    } catch {
-      // Keep the stored title even if member hydration fails.
-    }
     return;
   }
 
@@ -1879,10 +1957,17 @@ async function syncDbGroupHistoryFull(params: {
   const fallbackCount = 200;
   params.progress?.(`merging recent group API window (${fallbackCount} per group)`);
   const beforeApiCount = await getStoredGroupMessageCount();
+  const topoffErrors: { groupId: string; error: string }[] = [];
   for (const groupId of params.targetGroupIds) {
-    const messages = await fetchRecentGroupMessagesViaApi(params.api, groupId, fallbackCount);
-    await persistMessages(messages);
-    params.progress?.(`group ${groupId}: fetched ${messages.length} message(s) from group history API`);
+    try {
+      const messages = await fetchRecentGroupMessagesViaApi(params.api, groupId, fallbackCount);
+      await persistMessages(messages);
+      params.progress?.(`group ${groupId}: fetched ${messages.length} message(s) from group history API`);
+    } catch (error) {
+      const message = toErrorText(error);
+      topoffErrors.push({ groupId, error: message });
+      params.progress?.(`group ${groupId}: group history API skipped (${message})`);
+    }
   }
   const afterCount = await getStoredGroupMessageCount();
   const apiAddedCount = afterCount - beforeApiCount;
@@ -1915,6 +2000,7 @@ async function syncDbGroupHistoryFull(params: {
     completeness,
     stopReason,
     pagesRequested,
+    topoffErrors,
   });
 }
 
@@ -2104,30 +2190,70 @@ async function runDbSync(params: {
     }
 
     if (params.mode === "all" || params.mode === "groups") {
-      const groups = await buildGroupsDetailed(api);
+      const groups = await api.getAllGroups();
+      const groupIds = Object.keys(groups.gridVerMap ?? {});
       const targetGroupIds = new Set<string>();
       const titleById = new Map<string, string | undefined>();
-      for (const group of groups) {
-        const record = group as Record<string, unknown>;
-        const groupId = normalizeCachedId(record.groupId);
-        if (!groupId) continue;
-        const title =
-          typeof record.name === "string" && record.name.trim()
-            ? record.name.trim()
-          : typeof record.groupName === "string" && record.groupName.trim()
-              ? record.groupName.trim()
-              : undefined;
-        targetGroupIds.add(groupId);
-        titleById.set(groupId, title);
-        await prepareDbGroupTarget({
-          profile,
-          api,
-          groupId,
-          title,
-          rawJson: JSON.stringify(group),
-          pinnedIds,
-          hiddenIds,
-        });
+      params.progress?.(`syncing group directory for ${groupIds.length} group(s)`);
+      for (const groupId of groupIds) {
+        let group: Record<string, unknown> | undefined;
+        let title: string | undefined;
+        try {
+          try {
+            group = await fetchGroupInfoRecord(api, groupId);
+            title = extractGroupTitle(group);
+          } catch (error) {
+            const message = toErrorText(error);
+            params.progress?.(`group ${groupId}: metadata unavailable (${message}), continuing`);
+            summary.syncState.push({
+              kind: "group",
+              groupId,
+              status: "warning",
+              stage: "metadata",
+              error: message,
+            });
+          }
+          const { memberSnapshotError } = await prepareDbGroupTarget({
+            profile,
+            api,
+            groupId,
+            group,
+            title,
+            rawJson: group ? JSON.stringify(group) : undefined,
+            pinnedIds,
+            hiddenIds,
+            hydrateMembers: Boolean(group),
+          });
+          if (memberSnapshotError) {
+            params.progress?.(`group ${groupId}: member snapshot unavailable (${memberSnapshotError}), continuing`);
+            summary.syncState.push({
+              kind: "group",
+              groupId,
+              status: "warning",
+              stage: "members",
+              error: memberSnapshotError,
+            });
+          }
+          targetGroupIds.add(groupId);
+          titleById.set(groupId, title);
+        } catch (error) {
+          const message = toErrorText(error);
+          params.progress?.(`group ${groupId}: skipped (${message})`);
+          await setSyncState({
+            profile,
+            scopeThreadId: groupId,
+            threadType: "group",
+            status: "error",
+            error: message,
+          });
+          summary.syncState.push({
+            kind: "group",
+            groupId,
+            status: "error",
+            stage: "prepare",
+            error: message,
+          });
+        }
       }
       await syncDbGroupHistoryFull({
         profile,
@@ -2144,21 +2270,29 @@ async function runDbSync(params: {
       if (!params.groupId) {
         throw new Error("Missing group id for db sync group.");
       }
-      const groupInfo = await api.getGroupInfo(params.groupId);
-      const group = groupInfo.gridInfoMap[params.groupId] as Record<string, unknown> | undefined;
-      const title =
-        typeof group?.name === "string" && group.name.trim()
-          ? group.name.trim()
-          : undefined;
-      await prepareDbGroupTarget({
+      const group = await fetchGroupInfoRecord(api, params.groupId);
+      const title = extractGroupTitle(group);
+      const { memberSnapshotError } = await prepareDbGroupTarget({
         profile,
         api,
         groupId: params.groupId,
+        group,
         title,
         rawJson: group ? JSON.stringify(group) : undefined,
         pinnedIds,
         hiddenIds,
+        hydrateMembers: Boolean(group),
       });
+      if (memberSnapshotError) {
+        params.progress?.(`group ${params.groupId}: member snapshot unavailable (${memberSnapshotError}), continuing`);
+        summary.syncState.push({
+          kind: "group",
+          groupId: params.groupId,
+          status: "warning",
+          stage: "members",
+          error: memberSnapshotError,
+        });
+      }
       await syncDbGroupHistoryFull({
         profile,
         api,
@@ -2223,9 +2357,9 @@ async function buildGroupsDetailed(api: API): Promise<any[]> {
   const ids = Object.keys(groups.gridVerMap ?? {});
   if (ids.length === 0) return [];
 
-  const info = await api.getGroupInfo(ids);
+  const info = await fetchGroupInfoRecords(api, ids);
   return ids
-    .map((id) => info.gridInfoMap?.[id])
+    .map((id) => info.get(id))
     .filter((item): item is NonNullable<typeof item> => Boolean(item));
 }
 
@@ -2245,9 +2379,12 @@ type GroupMemberSnapshotRow = GroupMentionMember & {
   rawJson?: string;
 };
 
-async function listGroupMemberRows(api: API, groupId: string): Promise<GroupMemberSnapshotRow[]> {
-  const info = await api.getGroupInfo(groupId);
-  const groupInfo = info.gridInfoMap[groupId];
+async function listGroupMemberRows(
+  api: API,
+  groupId: string,
+  preloadedGroupInfo?: Record<string, unknown>,
+): Promise<GroupMemberSnapshotRow[]> {
+  const groupInfo = preloadedGroupInfo ?? await fetchGroupInfoRecord(api, groupId);
   if (!groupInfo) {
     throw new Error(`Group not found: ${groupId}`);
   }
@@ -2279,17 +2416,15 @@ async function listGroupMemberRows(api: API, groupId: string): Promise<GroupMemb
     ]),
   );
 
-  const profiles = ids.length > 0 ? await api.getGroupMembersInfo(ids) : { profiles: {} };
-  const rawProfileMap = profiles.profiles as Record<
-    string,
-    {
-      id?: string;
-      displayName?: string;
-      zaloName?: string;
-      avatar?: string;
-      accountStatus?: number;
-    } | undefined
-  >;
+  const profileLookup = ids.length > 0
+    ? await fetchGroupMemberProfiles(api, ids)
+    : new Map<string, {
+        id?: string;
+        displayName?: string;
+        zaloName?: string;
+        avatar?: string;
+        accountStatus?: number;
+      }>();
   const profileMap = new Map<
     string,
     {
@@ -2300,7 +2435,7 @@ async function listGroupMemberRows(api: API, groupId: string): Promise<GroupMemb
       rawJson?: string;
     }
   >();
-  for (const [key, profile] of Object.entries(rawProfileMap)) {
+  for (const [key, profile] of profileLookup.entries()) {
     if (!profile) continue;
     const normalizedKey = normalizeGroupMemberId(key);
     if (normalizedKey && !profileMap.has(normalizedKey)) {
