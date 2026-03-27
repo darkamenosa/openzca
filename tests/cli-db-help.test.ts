@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tsxCliPath = path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
+const distCliPath = path.join(repoRoot, "dist", "cli.js");
 
 function runCli(args: string[], env?: NodeJS.ProcessEnv) {
   return spawnSync(process.execPath, [tsxCliPath, "src/cli.ts", ...args], {
@@ -31,6 +32,17 @@ function runTsxEval(source: string, env?: NodeJS.ProcessEnv) {
   });
 }
 
+function runDistCli(args: string[], env?: NodeJS.ProcessEnv) {
+  return spawnSync(process.execPath, [distCliPath, ...args], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ...env,
+    },
+  });
+}
+
 async function loadDbModule(tempHome: string) {
   process.env.OPENZCA_HOME = tempHome;
   const moduleUrl = `${pathToFileURL(path.join(repoRoot, "src/lib/db.ts")).href}?t=${Date.now()}-${Math.random()}`;
@@ -44,6 +56,7 @@ test("db help lists grouped subcommands", () => {
   assert.match(result.stdout, /\breset\b/);
   assert.match(result.stdout, /\bme\b/);
   assert.match(result.stdout, /\bgroup\b/);
+  assert.match(result.stdout, /\bcontact\b/);
   assert.match(result.stdout, /\bfriend\b/);
   assert.match(result.stdout, /\bchat\b/);
   assert.match(result.stdout, /\bmessage\b/);
@@ -99,6 +112,197 @@ test("db friend help lists list find info and messages", () => {
   assert.match(result.stdout, /\bfind\b/);
   assert.match(result.stdout, /\binfo\b/);
   assert.match(result.stdout, /\bmessages\b/);
+});
+
+test("db contact help lists list find info and messages", () => {
+  const result = runCli(["db", "contact", "--help"]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\blist\b/);
+  assert.match(result.stdout, /\bfind\b/);
+  assert.match(result.stdout, /\binfo\b/);
+  assert.match(result.stdout, /\bmessages\b/);
+});
+
+test("db contact subcommands honor -j JSON output", { concurrency: false }, async (t) => {
+  const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-cli-db-contact-json-"));
+  const profile = "cli-db-contact-json";
+  const env = { OPENZCA_HOME: tempHome };
+
+  t.after(async () => {
+    await fs.rm(tempHome, { recursive: true, force: true });
+  });
+
+  const addProfile = runCli(["account", "add", profile], env);
+  assert.equal(addProfile.status, 0, addProfile.stderr);
+
+  const seedResult = runTsxEval(
+    `
+      import { enableDb, persistContact, persistThread, persistMessage, closeDb } from "./src/lib/db.ts";
+      (async () => {
+        await enableDb(${JSON.stringify(profile)});
+        await persistContact({
+          profile: ${JSON.stringify(profile)},
+          userId: "u1",
+          displayName: "Alice",
+          relationship: "seen_dm",
+        });
+        await persistThread({
+          profile: ${JSON.stringify(profile)},
+          scopeThreadId: "u1",
+          rawThreadId: "u1",
+          threadType: "user",
+          peerId: "u1",
+          title: "Alice",
+        });
+        await persistMessage({
+          profile: ${JSON.stringify(profile)},
+          scopeThreadId: "u1",
+          rawThreadId: "u1",
+          threadType: "user",
+          msgId: "m1",
+          cliMsgId: "c1",
+          senderId: "u1",
+          senderName: "Alice",
+          toId: "self-1",
+          timestampMs: 1700000000000,
+          msgType: "chat.text",
+          contentText: "hello",
+          source: "listen",
+          rawMessageJson: JSON.stringify({ msgId: "m1" }),
+        });
+        await closeDb(${JSON.stringify(profile)});
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `,
+    env,
+  );
+  assert.equal(seedResult.status, 0, seedResult.stderr || seedResult.stdout);
+
+  const listResult = runCli(["--profile", profile, "db", "contact", "list", "-j"], env);
+  assert.equal(listResult.status, 0, listResult.stderr);
+  const listPayload = JSON.parse(listResult.stdout) as Array<{ userId: string; relationship: string }>;
+  assert.equal(listPayload[0]?.userId, "u1");
+  assert.equal(listPayload[0]?.relationship, "seen_dm");
+
+  const infoResult = runCli(["--profile", profile, "db", "contact", "info", "u1", "-j"], env);
+  assert.equal(infoResult.status, 0, infoResult.stderr);
+  const infoPayload = JSON.parse(infoResult.stdout) as { userId: string; chatId: string };
+  assert.equal(infoPayload.userId, "u1");
+  assert.equal(infoPayload.chatId, "u1");
+});
+
+test("db contact messages resolves the canonical chat id for legacy DM threads", { concurrency: false }, async (t) => {
+  const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-cli-db-contact-messages-"));
+  const profile = "cli-db-contact-messages";
+  const env = { OPENZCA_HOME: tempHome };
+
+  t.after(async () => {
+    await fs.rm(tempHome, { recursive: true, force: true });
+  });
+
+  const addProfile = runCli(["account", "add", profile], env);
+  assert.equal(addProfile.status, 0, addProfile.stderr);
+
+  const seedResult = runTsxEval(
+    `
+      import { enableDb, persistContact, persistThread, persistMessage, closeDb } from "./src/lib/db.ts";
+      (async () => {
+        await enableDb(${JSON.stringify(profile)});
+        await persistContact({
+          profile: ${JSON.stringify(profile)},
+          userId: "u1",
+          displayName: "Alice",
+          relationship: "seen_dm",
+        });
+        await persistThread({
+          profile: ${JSON.stringify(profile)},
+          scopeThreadId: "legacy-u1",
+          rawThreadId: "legacy-u1",
+          threadType: "user",
+          peerId: "u1",
+          title: "Legacy Alice",
+        });
+        await persistMessage({
+          profile: ${JSON.stringify(profile)},
+          scopeThreadId: "legacy-u1",
+          rawThreadId: "legacy-u1",
+          threadType: "user",
+          peerId: "u1",
+          msgId: "m1",
+          cliMsgId: "c1",
+          senderId: "u1",
+          senderName: "Alice",
+          toId: "self-1",
+          timestampMs: 1700000000000,
+          msgType: "chat.text",
+          contentText: "hello",
+          source: "listen"
+        });
+        await persistThread({
+          profile: ${JSON.stringify(profile)},
+          scopeThreadId: "u1",
+          rawThreadId: "u1",
+          threadType: "user",
+          peerId: "u1",
+          title: "Canonical Alice",
+        });
+        await closeDb(${JSON.stringify(profile)});
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `,
+    env,
+  );
+  assert.equal(seedResult.status, 0, seedResult.stderr || seedResult.stdout);
+
+  const result = runCli(["--profile", profile, "db", "contact", "messages", "u1", "-j"], env);
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout) as {
+    userId: string;
+    chatId: string;
+    count: number;
+    messages: Array<{ msgId: string }>;
+  };
+  assert.equal(payload.userId, "u1");
+  assert.equal(payload.chatId, "legacy-u1");
+  assert.equal(payload.count, 1);
+  assert.equal(payload.messages[0]?.msgId, "m1");
+});
+
+test("built dist CLI can enable DB and read DB status", { concurrency: false }, async (t) => {
+  const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-cli-dist-db-"));
+  const profile = "cli-dist-db";
+  const env = { OPENZCA_HOME: tempHome };
+
+  t.after(async () => {
+    await fs.rm(tempHome, { recursive: true, force: true });
+  });
+
+  const buildResult = spawnSync("npm", ["run", "build"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ...env,
+    },
+  });
+  assert.equal(buildResult.status, 0, buildResult.stderr || buildResult.stdout);
+
+  const addProfile = runDistCli(["account", "add", profile], env);
+  assert.equal(addProfile.status, 0, addProfile.stderr);
+
+  const enableResult = runDistCli(["--profile", profile, "db", "enable"], env);
+  assert.equal(enableResult.status, 0, enableResult.stderr);
+
+  const statusResult = runDistCli(["--profile", profile, "db", "status", "-j"], env);
+  assert.equal(statusResult.status, 0, statusResult.stderr);
+  const payload = JSON.parse(statusResult.stdout) as { enabled: boolean; exists: boolean };
+  assert.equal(payload.enabled, true);
+  assert.equal(payload.exists, true);
 });
 
 test("db chat help lists list info and messages", () => {

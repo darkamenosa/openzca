@@ -1,6 +1,6 @@
 {
   "name": "openzca",
-  "version": "0.1.53",
+  "version": "0.1.54",
   "description": "Open-source zca-compatible CLI to integrate Zalo with OpenClaw",
   "type": "module",
   "bin": {
@@ -16,7 +16,7 @@
   "scripts": {
     "build": "npm run build:cli && npm run build:worker",
     "build:cli": "tsup src/cli.ts --format esm --target node22 --out-dir dist --clean",
-    "build:worker": "tsup src/lib/db-worker.ts --format esm --target node22 --out-dir dist",
+    "build:worker": "tsup src/lib/db-worker.ts src/lib/db-migrations.ts --format esm --target node22 --out-dir dist && node scripts/copy-db-migrations.mjs",
     "dev": "tsx src/cli.ts",
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.json",

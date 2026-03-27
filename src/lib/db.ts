@@ -281,15 +281,22 @@ export type DbThreadMemberRecord = {
   snapshotAtMs: number;
 };
 
-export type DbFriendRecord = {
+export type DbContactRelationship = "friend" | "seen_dm" | "seen_group" | "unknown";
+
+export type DbContactRecord = {
   profile: string;
   userId: string;
   displayName?: string;
   zaloName?: string;
   avatar?: string;
   accountStatus?: number;
+  relationship?: DbContactRelationship;
+  firstSeenAtMs?: number;
+  lastSeenAtMs?: number;
   rawJson?: string;
 };
+
+export type DbFriendRecord = DbContactRecord;
 
 export type DbMessageRecord = {
   profile: string;
@@ -375,17 +382,22 @@ export type DbStatus = {
   updatedAt?: string;
 };
 
-export type DbFriendRow = {
+export type DbContactRow = {
   userId: string;
   displayName?: string;
   zaloName?: string;
   avatar?: string;
   accountStatus?: number;
+  relationship: DbContactRelationship;
+  firstSeenAtMs?: number;
+  lastSeenAtMs?: number;
   title?: string;
   chatId: string;
   messageCount: number;
   lastMessageAtMs?: number;
 };
+
+export type DbFriendRow = DbContactRow;
 
 export type DbSelfProfileRow = {
   userId: string;
@@ -432,6 +444,36 @@ const INSERT_THREAD_MEMBER_SQL = `
     profile, scope_thread_id, user_id, display_name, zalo_name, avatar,
     account_status, member_type, raw_json, snapshot_at_ms, created_at, updated_at
   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`;
+
+const UPSERT_CONTACT_SQL = `
+  INSERT INTO contacts (
+    profile, user_id, display_name, zalo_name, avatar, account_status,
+    relationship, first_seen_at_ms, last_seen_at_ms, raw_json, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(profile, user_id) DO UPDATE SET
+    display_name = COALESCE(excluded.display_name, contacts.display_name),
+    zalo_name = COALESCE(excluded.zalo_name, contacts.zalo_name),
+    avatar = COALESCE(excluded.avatar, contacts.avatar),
+    account_status = COALESCE(excluded.account_status, contacts.account_status),
+    relationship = CASE
+      WHEN contacts.relationship = 'friend' OR excluded.relationship = 'friend' THEN 'friend'
+      WHEN contacts.relationship = 'seen_dm' OR excluded.relationship = 'seen_dm' THEN 'seen_dm'
+      WHEN contacts.relationship = 'seen_group' OR excluded.relationship = 'seen_group' THEN 'seen_group'
+      ELSE COALESCE(excluded.relationship, contacts.relationship, 'unknown')
+    END,
+    first_seen_at_ms = CASE
+      WHEN contacts.first_seen_at_ms IS NULL THEN excluded.first_seen_at_ms
+      WHEN excluded.first_seen_at_ms IS NULL THEN contacts.first_seen_at_ms
+      ELSE MIN(contacts.first_seen_at_ms, excluded.first_seen_at_ms)
+    END,
+    last_seen_at_ms = CASE
+      WHEN contacts.last_seen_at_ms IS NULL THEN excluded.last_seen_at_ms
+      WHEN excluded.last_seen_at_ms IS NULL THEN contacts.last_seen_at_ms
+      ELSE MAX(contacts.last_seen_at_ms, excluded.last_seen_at_ms)
+    END,
+    raw_json = COALESCE(excluded.raw_json, contacts.raw_json),
+    updated_at = excluded.updated_at
 `;
 
 const UPSERT_MESSAGE_SQL = `
@@ -520,6 +562,13 @@ function normalizeOptionalInt(value: unknown): number | undefined {
     }
   }
   return undefined;
+}
+
+function normalizeRelationship(value: unknown): DbContactRelationship | undefined {
+  if (value !== "friend" && value !== "seen_dm" && value !== "seen_group" && value !== "unknown") {
+    return undefined;
+  }
+  return value;
 }
 
 function normalizeSearchText(value: string): string {
@@ -830,35 +879,30 @@ export async function replaceThreadMembers(
   await db.batch(commands, true);
 }
 
-export async function persistFriend(record: DbFriendRecord): Promise<void> {
+export async function persistContact(record: DbContactRecord): Promise<void> {
   const db = await getDb(record.profile);
   const now = nowIso();
-  await db.run(
-    `
-      INSERT INTO friends (
-        profile, user_id, display_name, zalo_name, avatar,
-        account_status, raw_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(profile, user_id) DO UPDATE SET
-        display_name = COALESCE(excluded.display_name, friends.display_name),
-        zalo_name = COALESCE(excluded.zalo_name, friends.zalo_name),
-        avatar = COALESCE(excluded.avatar, friends.avatar),
-        account_status = COALESCE(excluded.account_status, friends.account_status),
-        raw_json = COALESCE(excluded.raw_json, friends.raw_json),
-        updated_at = excluded.updated_at
-    `,
-    [
-      record.profile,
-      record.userId,
-      record.displayName ?? null,
-      record.zaloName ?? null,
-      record.avatar ?? null,
-      record.accountStatus ?? null,
-      record.rawJson ?? null,
-      now,
-      now,
-    ],
-  );
+  await db.run(UPSERT_CONTACT_SQL, [
+    record.profile,
+    record.userId,
+    record.displayName ?? null,
+    record.zaloName ?? null,
+    record.avatar ?? null,
+    record.accountStatus ?? null,
+    normalizeRelationship(record.relationship) ?? "unknown",
+    record.firstSeenAtMs ?? null,
+    record.lastSeenAtMs ?? null,
+    record.rawJson ?? null,
+    now,
+    now,
+  ]);
+}
+
+export async function persistFriend(record: DbFriendRecord): Promise<void> {
+  await persistContact({
+    ...record,
+    relationship: "friend",
+  });
 }
 
 export async function persistSelfProfile(params: {
@@ -1129,8 +1173,8 @@ export async function listMessages(params: {
           NULLIF(m.sender_name, ''),
           NULLIF(tm.display_name, ''),
           NULLIF(tm.zalo_name, ''),
-          NULLIF(f.display_name, ''),
-          NULLIF(f.zalo_name, '')
+          NULLIF(c.display_name, ''),
+          NULLIF(c.zalo_name, '')
         ) AS sender_name,
         m.to_id,
         m.timestamp_ms,
@@ -1147,9 +1191,9 @@ export async function listMessages(params: {
         ON tm.profile = m.profile
         AND tm.scope_thread_id = m.scope_thread_id
         AND tm.user_id = m.sender_id
-      LEFT JOIN friends f
-        ON f.profile = m.profile
-        AND f.user_id = m.sender_id
+      LEFT JOIN contacts c
+        ON c.profile = m.profile
+        AND c.user_id = m.sender_id
       WHERE m.profile = ?
         AND m.scope_thread_id = ?
         AND m.thread_type = ?
@@ -1414,46 +1458,93 @@ export async function getThreadInfo(params: {
   };
 }
 
-type FriendAggRow = {
+type ContactAggRow = {
   user_id: string;
   display_name: string | null;
   zalo_name: string | null;
   avatar: string | null;
   account_status: number | null;
+  relationship: DbContactRelationship;
+  first_seen_at_ms: number | null;
+  last_seen_at_ms: number | null;
   chat_id: string | null;
   title: string | null;
   message_count: number;
   last_message_at_ms: number | null;
 };
 
-export async function listFriends(profile: string): Promise<DbFriendRow[]> {
-  const db = await getDb(profile);
-  const rows = await db.all<FriendAggRow[]>(
+const CONTACT_CHAT_CTE = `
+  WITH ranked_contact_threads AS (
+    SELECT
+      c.profile AS contact_profile,
+      c.user_id,
+      t.scope_thread_id,
+      t.title,
+      COUNT(m.message_uid) AS message_count,
+      MAX(m.timestamp_ms) AS last_message_at_ms,
+      ROW_NUMBER() OVER (
+        PARTITION BY c.profile, c.user_id
+        ORDER BY
+          COALESCE(MAX(m.timestamp_ms), 0) DESC,
+          CASE
+            WHEN t.scope_thread_id = c.user_id THEN 0
+            WHEN t.peer_id = c.user_id THEN 1
+            WHEN t.raw_thread_id = c.user_id THEN 2
+            ELSE 3
+          END,
+          t.updated_at DESC,
+          t.scope_thread_id
+      ) AS thread_rank
+    FROM contacts c
+    LEFT JOIN threads t
+      ON t.profile = c.profile
+      AND t.thread_type = 'user'
+      AND (t.peer_id = c.user_id OR t.scope_thread_id = c.user_id OR t.raw_thread_id = c.user_id)
+    LEFT JOIN messages m
+      ON m.profile = t.profile
+      AND m.scope_thread_id = t.scope_thread_id
+    GROUP BY
+      c.profile,
+      c.user_id,
+      t.scope_thread_id,
+      t.title,
+      t.updated_at,
+      t.peer_id,
+      t.raw_thread_id
+  )
+`;
+
+export async function listContacts(params: {
+  profile: string;
+  relationship?: DbContactRelationship;
+}): Promise<DbContactRow[]> {
+  const db = await getDb(params.profile);
+  const rows = await db.all<ContactAggRow[]>(
     `
+      ${CONTACT_CHAT_CTE}
       SELECT
-        f.user_id,
-        f.display_name,
-        f.zalo_name,
-        f.avatar,
-        f.account_status,
-        t.scope_thread_id AS chat_id,
-        t.title,
-        COUNT(m.message_uid) AS message_count,
-        MAX(m.timestamp_ms) AS last_message_at_ms
-      FROM friends f
-      LEFT JOIN threads t
-        ON t.profile = f.profile
-        AND t.thread_type = 'user'
-        AND (t.peer_id = f.user_id OR t.scope_thread_id = f.user_id OR t.raw_thread_id = f.user_id)
-      LEFT JOIN messages m
-        ON m.profile = t.profile
-        AND m.scope_thread_id = t.scope_thread_id
-      WHERE f.profile = ?
-      GROUP BY
-        f.user_id, f.display_name, f.zalo_name, f.avatar, f.account_status, t.scope_thread_id, t.title
-      ORDER BY COALESCE(f.display_name, f.zalo_name, f.user_id), f.user_id
+        c.user_id,
+        c.display_name,
+        c.zalo_name,
+        c.avatar,
+        c.account_status,
+        c.relationship,
+        c.first_seen_at_ms,
+        c.last_seen_at_ms,
+        r.scope_thread_id AS chat_id,
+        r.title,
+        COALESCE(r.message_count, 0) AS message_count,
+        r.last_message_at_ms
+      FROM contacts c
+      LEFT JOIN ranked_contact_threads r
+        ON r.contact_profile = c.profile
+        AND r.user_id = c.user_id
+        AND r.thread_rank = 1
+      WHERE c.profile = ?
+        AND (? IS NULL OR c.relationship = ?)
+      ORDER BY COALESCE(c.display_name, c.zalo_name, c.user_id), c.user_id
     `,
-    [profile],
+    [params.profile, params.relationship ?? null, params.relationship ?? null],
   );
   return rows.map((row) => ({
     userId: row.user_id,
@@ -1461,6 +1552,9 @@ export async function listFriends(profile: string): Promise<DbFriendRow[]> {
     zaloName: row.zalo_name ?? undefined,
     avatar: row.avatar ?? undefined,
     accountStatus: row.account_status ?? undefined,
+    relationship: normalizeRelationship(row.relationship) ?? "unknown",
+    firstSeenAtMs: row.first_seen_at_ms ?? undefined,
+    lastSeenAtMs: row.last_seen_at_ms ?? undefined,
     title: row.title ?? undefined,
     chatId: row.chat_id ?? row.user_id,
     messageCount: row.message_count,
@@ -1468,44 +1562,53 @@ export async function listFriends(profile: string): Promise<DbFriendRow[]> {
   }));
 }
 
-type FriendInfoRow = FriendAggRow & {
+export async function listFriends(profile: string): Promise<DbFriendRow[]> {
+  return await listContacts({ profile, relationship: "friend" });
+}
+
+type ContactInfoRow = ContactAggRow & {
   raw_json: string | null;
 };
 
-export async function getFriendInfo(params: {
+export async function getContactInfo(params: {
   profile: string;
   userId: string;
+  relationship?: DbContactRelationship;
 }): Promise<Record<string, unknown> | null> {
   const db = await getDb(params.profile);
-  const row = await db.get<FriendInfoRow>(
+  const row = await db.get<ContactInfoRow>(
     `
+      ${CONTACT_CHAT_CTE}
       SELECT
-        f.user_id,
-        f.display_name,
-        f.zalo_name,
-        f.avatar,
-        f.account_status,
-        f.raw_json,
-        t.scope_thread_id AS chat_id,
-        t.title,
-        COUNT(m.message_uid) AS message_count,
-        MAX(m.timestamp_ms) AS last_message_at_ms
-      FROM friends f
-      LEFT JOIN threads t
-        ON t.profile = f.profile
-        AND t.thread_type = 'user'
-        AND (t.peer_id = f.user_id OR t.scope_thread_id = f.user_id OR t.raw_thread_id = f.user_id)
-      LEFT JOIN messages m
-        ON m.profile = t.profile
-        AND m.scope_thread_id = t.scope_thread_id
-      WHERE f.profile = ?
-        AND f.user_id = ?
-      GROUP BY
-        f.user_id, f.display_name, f.zalo_name, f.avatar, f.account_status,
-        f.raw_json, t.scope_thread_id, t.title
+        c.user_id,
+        c.display_name,
+        c.zalo_name,
+        c.avatar,
+        c.account_status,
+        c.relationship,
+        c.first_seen_at_ms,
+        c.last_seen_at_ms,
+        c.raw_json,
+        r.scope_thread_id AS chat_id,
+        r.title,
+        COALESCE(r.message_count, 0) AS message_count,
+        r.last_message_at_ms
+      FROM contacts c
+      LEFT JOIN ranked_contact_threads r
+        ON r.contact_profile = c.profile
+        AND r.user_id = c.user_id
+        AND r.thread_rank = 1
+      WHERE c.profile = ?
+        AND c.user_id = ?
+        AND (? IS NULL OR c.relationship = ?)
       LIMIT 1
     `,
-    [params.profile, params.userId],
+    [
+      params.profile,
+      params.userId,
+      params.relationship ?? null,
+      params.relationship ?? null,
+    ],
   );
   if (!row) {
     return null;
@@ -1516,6 +1619,9 @@ export async function getFriendInfo(params: {
     zaloName: row.zalo_name ?? undefined,
     avatar: row.avatar ?? undefined,
     accountStatus: row.account_status ?? undefined,
+    relationship: normalizeRelationship(row.relationship) ?? "unknown",
+    firstSeenAtMs: row.first_seen_at_ms ?? undefined,
+    lastSeenAtMs: row.last_seen_at_ms ?? undefined,
     title: row.title ?? undefined,
     chatId: row.chat_id ?? row.user_id,
     messageCount: row.message_count,
@@ -1524,15 +1630,30 @@ export async function getFriendInfo(params: {
   };
 }
 
-export async function findFriends(params: {
+export async function getFriendInfo(params: {
+  profile: string;
+  userId: string;
+}): Promise<Record<string, unknown> | null> {
+  return await getContactInfo({
+    profile: params.profile,
+    userId: params.userId,
+    relationship: "friend",
+  });
+}
+
+export async function findContacts(params: {
   profile: string;
   query: string;
-}): Promise<DbFriendRow[]> {
+  relationship?: DbContactRelationship;
+}): Promise<DbContactRow[]> {
   const query = normalizeSearchText(params.query);
   if (!query) {
     return [];
   }
-  const rows = await listFriends(params.profile);
+  const rows = await listContacts({
+    profile: params.profile,
+    relationship: params.relationship,
+  });
   return rows.filter((row) => {
     const haystacks = [
       row.userId,
@@ -1542,6 +1663,63 @@ export async function findFriends(params: {
     ];
     return haystacks.some((value) => matchesSearchPattern(value, query));
   });
+}
+
+export async function findFriends(params: {
+  profile: string;
+  query: string;
+}): Promise<DbFriendRow[]> {
+  return await findContacts({
+    profile: params.profile,
+    query: params.query,
+    relationship: "friend",
+  });
+}
+
+export async function reconcileFriendRelationships(params: {
+  profile: string;
+  currentFriendIds: string[];
+}): Promise<void> {
+  const db = await getDb(params.profile);
+  const now = nowIso();
+  const friendIds = Array.from(
+    new Set(params.currentFriendIds.map((value) => normalizeId(value)).filter(Boolean)),
+  );
+  const stalePredicate = friendIds.length > 0
+    ? `AND contacts.user_id NOT IN (${friendIds.map(() => "?").join(", ")})`
+    : "";
+  const sqlParams: Array<string> = [now, params.profile, ...friendIds];
+
+  await db.run(
+    `
+      UPDATE contacts
+      SET relationship = CASE
+        WHEN EXISTS (
+          SELECT 1
+          FROM threads t
+          WHERE t.profile = contacts.profile
+            AND t.thread_type = 'user'
+            AND (
+              t.peer_id = contacts.user_id
+              OR t.scope_thread_id = contacts.user_id
+              OR t.raw_thread_id = contacts.user_id
+            )
+        ) THEN 'seen_dm'
+        WHEN EXISTS (
+          SELECT 1
+          FROM thread_members tm
+          WHERE tm.profile = contacts.profile
+            AND tm.user_id = contacts.user_id
+        ) THEN 'seen_group'
+        ELSE 'unknown'
+      END,
+      updated_at = ?
+      WHERE contacts.profile = ?
+        AND contacts.relationship = 'friend'
+        ${stalePredicate}
+    `,
+    sqlParams,
+  );
 }
 
 export async function listChats(profile: string): Promise<DbThreadRow[]> {

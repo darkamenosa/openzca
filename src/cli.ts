@@ -45,7 +45,9 @@ import {
   disableDb,
   enableDb,
   enqueueDbWrite,
+  findContacts,
   findFriends,
+  getContactInfo,
   getFriendInfo,
   getDbConfigPath,
   getDbStatus,
@@ -54,6 +56,7 @@ import {
   getThreadInfo,
   isDbEnabled,
   listChats,
+  listContacts,
   listFriends,
   listGroups,
   listMessages,
@@ -61,11 +64,12 @@ import {
   listSyncState,
   listThreadMembers,
   normalizeInboundListenRecord,
-  persistFriend,
+  persistContact,
   persistMessage,
   persistSelfProfile,
   persistThread,
   readDbConfig,
+  reconcileFriendRelationships,
   replaceThreadMembers,
   resolveDbPath,
   resolveScopeThreadId,
@@ -1278,6 +1282,20 @@ async function persistGroupMembersSnapshot(
 ): Promise<void> {
   const rows = await listGroupMemberRows(api, groupId);
   const snapshotAtMs = Date.now();
+  for (const row of rows) {
+    await persistContact({
+      profile,
+      userId: row.userId,
+      displayName: row.displayName,
+      zaloName: row.zaloName,
+      avatar: row.avatar,
+      accountStatus: row.accountStatus,
+      relationship: "seen_group",
+      firstSeenAtMs: snapshotAtMs,
+      lastSeenAtMs: snapshotAtMs,
+      rawJson: row.rawJson,
+    });
+  }
   await replaceThreadMembers(
     profile,
     groupId,
@@ -1287,7 +1305,9 @@ async function persistGroupMembersSnapshot(
       userId: row.userId,
       displayName: row.displayName,
       zaloName: row.zaloName,
-      rawJson: JSON.stringify(row),
+      avatar: row.avatar,
+      accountStatus: row.accountStatus,
+      rawJson: row.rawJson ?? JSON.stringify(row),
       snapshotAtMs,
     })),
   );
@@ -1316,7 +1336,7 @@ async function persistFriendDirectory(profile: string, api: API): Promise<Map<st
         : undefined;
     const title = displayName || zaloName || userId;
 
-    await persistFriend({
+    await persistContact({
       profile,
       userId,
       displayName,
@@ -1326,6 +1346,7 @@ async function persistFriendDirectory(profile: string, api: API): Promise<Map<st
         typeof record.accountStatus === "number" && Number.isFinite(record.accountStatus)
           ? Math.trunc(record.accountStatus)
           : undefined,
+      relationship: "friend",
       rawJson: JSON.stringify(friend),
     });
 
@@ -1341,6 +1362,11 @@ async function persistFriendDirectory(profile: string, api: API): Promise<Map<st
 
     nameById.set(userId, title);
   }
+
+  await reconcileFriendRelationships({
+    profile,
+    currentFriendIds: Array.from(nameById.keys()),
+  });
 
   return nameById;
 }
@@ -1549,6 +1575,150 @@ async function prepareDbGroupTarget(params: {
     rawJson: params.rawJson,
   });
   await persistGroupMembersSnapshot(params.profile, params.groupId, params.api);
+}
+
+function resolveContactDisplayName(params: {
+  userId: string;
+  displayName?: string;
+  zaloName?: string;
+  fallbackTitle?: string;
+}): string | undefined {
+  return params.displayName?.trim()
+    || params.zaloName?.trim()
+    || params.fallbackTitle?.trim()
+    || params.userId.trim()
+    || undefined;
+}
+
+async function persistLiveDmContact(params: {
+  profile: string;
+  api: API;
+  peerId: string;
+  senderDisplayName?: string;
+  senderName?: string;
+  timestampMs: number;
+  rawJson?: string;
+}): Promise<void> {
+  if (!params.peerId) {
+    return;
+  }
+
+  let displayName = params.senderDisplayName?.trim() || undefined;
+  let zaloName = params.senderName?.trim() || undefined;
+  let avatar: string | undefined;
+  let accountStatus: number | undefined;
+  let rawJson = params.rawJson;
+
+  const existing = await getContactInfo({
+    profile: params.profile,
+    userId: params.peerId,
+  });
+  if (!displayName || !existing?.avatar) {
+    try {
+      const response = await params.api.getUserInfo(params.peerId);
+      const profiles = (response.changed_profiles ?? {}) as Record<string, Record<string, unknown> | undefined>;
+      const profile =
+        profiles[params.peerId]
+        ?? profiles[`${params.peerId}_0`]
+        ?? Object.values(profiles).find((value) => normalizeCachedId(value?.userId ?? value?.uid) === params.peerId)
+        ?? undefined;
+      if (profile) {
+        displayName =
+          displayName
+          || (typeof profile.displayName === "string" && profile.displayName.trim() ? profile.displayName.trim() : undefined)
+          || (typeof profile.display_name === "string" && profile.display_name.trim() ? profile.display_name.trim() : undefined);
+        zaloName =
+          zaloName
+          || (typeof profile.zaloName === "string" && profile.zaloName.trim() ? profile.zaloName.trim() : undefined)
+          || (typeof profile.zalo_name === "string" && profile.zalo_name.trim() ? profile.zalo_name.trim() : undefined);
+        avatar =
+          typeof profile.avatar === "string" && profile.avatar.trim()
+            ? profile.avatar.trim()
+            : undefined;
+        accountStatus =
+          typeof profile.accountStatus === "number" && Number.isFinite(profile.accountStatus)
+            ? Math.trunc(profile.accountStatus)
+            : undefined;
+        rawJson = JSON.stringify(profile);
+      }
+    } catch {
+      // Best-effort enrichment only.
+    }
+  }
+
+  const title = resolveContactDisplayName({
+    userId: params.peerId,
+    displayName,
+    zaloName,
+    fallbackTitle: typeof existing?.title === "string" ? existing.title : undefined,
+  });
+  await persistContact({
+    profile: params.profile,
+    userId: params.peerId,
+    displayName,
+    zaloName,
+    avatar,
+    accountStatus,
+    relationship: "seen_dm",
+    firstSeenAtMs: params.timestampMs,
+    lastSeenAtMs: params.timestampMs,
+    rawJson,
+  });
+  await persistThread({
+    profile: params.profile,
+    scopeThreadId: params.peerId,
+    rawThreadId: params.peerId,
+    threadType: "user",
+    peerId: params.peerId,
+    title,
+    rawJson,
+  });
+}
+
+async function hydrateUnknownLiveGroup(params: {
+  profile: string;
+  api: API;
+  groupId: string;
+  fallbackTitle?: string;
+}): Promise<void> {
+  const existing = await getThreadInfo({
+    profile: params.profile,
+    threadId: params.groupId,
+    threadType: "group",
+  });
+  if (existing && (existing.title || (typeof existing.memberCount === "number" && existing.memberCount > 0))) {
+    return;
+  }
+
+  try {
+    const info = await params.api.getGroupInfo(params.groupId);
+    const group = info.gridInfoMap[params.groupId] as Record<string, unknown> | undefined;
+    const title =
+      typeof group?.name === "string" && group.name.trim()
+        ? group.name.trim()
+        : typeof group?.groupName === "string" && group.groupName.trim()
+          ? group.groupName.trim()
+          : params.fallbackTitle?.trim() || undefined;
+    await persistThread({
+      profile: params.profile,
+      scopeThreadId: params.groupId,
+      rawThreadId: params.groupId,
+      threadType: "group",
+      title,
+      rawJson: group ? JSON.stringify(group) : undefined,
+    });
+    await persistGroupMembersSnapshot(params.profile, params.groupId, params.api);
+  } catch {
+    if (params.fallbackTitle?.trim()) {
+      await persistThread({
+        profile: params.profile,
+        scopeThreadId: params.groupId,
+        rawThreadId: params.groupId,
+        threadType: "group",
+        title: params.fallbackTitle.trim(),
+      });
+    }
+  }
 }
 
 async function syncDbGroupHistoryFull(params: {
@@ -1991,7 +2161,13 @@ function normalizeGroupMemberId(value: unknown): string {
   return trimmed.replace(/_\d+$/, "");
 }
 
-async function listGroupMemberRows(api: API, groupId: string): Promise<GroupMentionMember[]> {
+type GroupMemberSnapshotRow = GroupMentionMember & {
+  avatar?: string;
+  accountStatus?: number;
+  rawJson?: string;
+};
+
+async function listGroupMemberRows(api: API, groupId: string): Promise<GroupMemberSnapshotRow[]> {
   const info = await api.getGroupInfo(groupId);
   const groupInfo = info.gridInfoMap[groupId];
   if (!groupInfo) {
@@ -2028,18 +2204,39 @@ async function listGroupMemberRows(api: API, groupId: string): Promise<GroupMent
   const profiles = ids.length > 0 ? await api.getGroupMembersInfo(ids) : { profiles: {} };
   const rawProfileMap = profiles.profiles as Record<
     string,
-    { id?: string; displayName?: string; zaloName?: string } | undefined
+    {
+      id?: string;
+      displayName?: string;
+      zaloName?: string;
+      avatar?: string;
+      accountStatus?: number;
+    } | undefined
   >;
-  const profileMap = new Map<string, { displayName?: string; zaloName?: string }>();
+  const profileMap = new Map<
+    string,
+    {
+      displayName?: string;
+      zaloName?: string;
+      avatar?: string;
+      accountStatus?: number;
+      rawJson?: string;
+    }
+  >();
   for (const [key, profile] of Object.entries(rawProfileMap)) {
     if (!profile) continue;
     const normalizedKey = normalizeGroupMemberId(key);
     if (normalizedKey && !profileMap.has(normalizedKey)) {
-      profileMap.set(normalizedKey, profile);
+      profileMap.set(normalizedKey, {
+        ...profile,
+        rawJson: JSON.stringify(profile),
+      });
     }
     const profileId = normalizeGroupMemberId(profile.id);
     if (profileId && !profileMap.has(profileId)) {
-      profileMap.set(profileId, profile);
+      profileMap.set(profileId, {
+        ...profile,
+        rawJson: JSON.stringify(profile),
+      });
     }
   }
 
@@ -2047,6 +2244,9 @@ async function listGroupMemberRows(api: API, groupId: string): Promise<GroupMent
     userId: id,
     displayName: profileMap.get(id)?.displayName ?? currentMemberMap.get(id)?.displayName ?? "",
     zaloName: profileMap.get(id)?.zaloName ?? currentMemberMap.get(id)?.zaloName ?? "",
+    avatar: profileMap.get(id)?.avatar,
+    accountStatus: profileMap.get(id)?.accountStatus,
+    rawJson: profileMap.get(id)?.rawJson,
   }));
 }
 
@@ -4642,47 +4842,58 @@ dbGroup
     }),
   );
 
-const dbFriend = dbCmd.command("friend").description("Query stored friend directory data");
+function registerDbContactQueryCommand(params: {
+  command: Command;
+  label: string;
+  relationship?: "friend";
+}): void {
+  params.command
+    .command("list")
+    .option("-j, --json", "JSON output")
+    .description(`List ${params.label} stored in the local DB`)
+    .action(
+      wrapAction(async (opts: { json?: boolean }, command: Command) => {
+        const profile = await currentProfile(command);
+        const rows = params.relationship === "friend"
+          ? await listFriends(profile)
+          : await listContacts({ profile });
+        output(rows, Boolean(opts.json));
+      }),
+    );
 
-dbFriend
-  .command("list")
-  .option("-j, --json", "JSON output")
-  .description("List friends stored in the local DB")
-  .action(
-    wrapAction(async (opts: { json?: boolean }, command: Command) => {
-      const profile = await currentProfile(command);
-      output(await listFriends(profile), Boolean(opts.json));
-    }),
-  );
+  params.command
+    .command("find <query>")
+    .option("-j, --json", "JSON output")
+    .description(`Find stored ${params.label} by ID or name`)
+    .action(
+      wrapAction(async (query: string, opts: { json?: boolean }, command: Command) => {
+        const profile = await currentProfile(command);
+        const rows = params.relationship === "friend"
+          ? await findFriends({ profile, query })
+          : await findContacts({ profile, query });
+        output(rows, Boolean(opts.json));
+      }),
+    );
 
-dbFriend
-  .command("find <query>")
-  .option("-j, --json", "JSON output")
-  .description("Find stored friends by ID or name")
-  .action(
-    wrapAction(async (query: string, opts: { json?: boolean }, command: Command) => {
-      const profile = await currentProfile(command);
-      output(await findFriends({ profile, query }), Boolean(opts.json));
-    }),
-  );
+  params.command
+    .command("info <userId>")
+    .option("-j, --json", "JSON output")
+    .description(`Show stored info for a ${params.label.slice(0, -1)}`)
+    .action(
+      wrapAction(async (userId: string, opts: { json?: boolean }, command: Command) => {
+        const profile = await currentProfile(command);
+        const row = params.relationship === "friend"
+          ? await getFriendInfo({ profile, userId })
+          : await getContactInfo({ profile, userId });
+        if (!row) {
+          throw new Error(`${params.label.slice(0, -1).replace(/^./, (value) => value.toUpperCase())} not found in DB: ${userId}`);
+        }
+        output(row, Boolean(opts.json));
+      }),
+    );
 
-dbFriend
-  .command("info <userId>")
-  .option("-j, --json", "JSON output")
-  .description("Show stored info for a friend")
-  .action(
-    wrapAction(async (userId: string, opts: { json?: boolean }, command: Command) => {
-      const profile = await currentProfile(command);
-      const row = await getFriendInfo({ profile, userId });
-      if (!row) {
-        throw new Error(`Friend not found in DB: ${userId}`);
-      }
-      output(row, Boolean(opts.json));
-    }),
-  );
-
-dbFriend
-  .command("messages <userId>")
+  params.command
+    .command("messages <userId>")
   .option("--since <duration>", "Rolling window ending now: duration like 30s, 7m, 24h, 7d, or 2w")
   .option("--from <time>", "Lower time bound: ISO timestamp, date, or unix seconds/ms")
   .option("--until <time>", "Upper time bound: ISO timestamp, date, or unix seconds/ms")
@@ -4691,7 +4902,7 @@ dbFriend
   .option("--all", "Return all matching rows")
   .option("--oldest-first", "Sort oldest-first instead of newest-first")
   .option("-j, --json", "JSON output")
-  .description("List stored direct-message rows for a friend")
+  .description(`List stored direct-message rows for a ${params.label.slice(0, -1)}`)
   .action(
     wrapAction(async (
       userId: string,
@@ -4709,9 +4920,16 @@ dbFriend
     ) => {
       const profile = await currentProfile(command);
       const { sinceMs, untilMs, limit, newestFirst } = resolveMessageQueryOptions(opts);
+      const contact = params.relationship === "friend"
+        ? await getFriendInfo({ profile, userId })
+        : await getContactInfo({ profile, userId });
+      const threadId =
+        contact && typeof contact.chatId === "string" && contact.chatId.trim()
+          ? contact.chatId
+          : userId;
       const rows = await listMessages({
         profile,
-        threadId: userId,
+        threadId,
         threadType: "user",
         sinceMs,
         untilMs,
@@ -4721,6 +4939,7 @@ dbFriend
       output(
         {
           userId,
+          chatId: threadId,
           count: rows.length,
           messages: rows,
         },
@@ -4728,6 +4947,20 @@ dbFriend
       );
     }),
   );
+}
+
+const dbContact = dbCmd.command("contact").description("Query stored contact data");
+registerDbContactQueryCommand({
+  command: dbContact,
+  label: "contacts",
+});
+
+const dbFriend = dbCmd.command("friend").description("Query stored confirmed friend contacts");
+registerDbContactQueryCommand({
+  command: dbFriend,
+  label: "friends",
+  relationship: "friend",
+});
 
 const dbChat = dbCmd
   .command("chat")
@@ -7338,35 +7571,57 @@ program
               rawJson: JSON.stringify(mention),
             }));
             scheduleDbWrite(profile, command, "listen.db.persist_error", async () => {
-              await persistMessage(
-                normalizeInboundListenRecord({
+              const normalizedRecord = normalizeInboundListenRecord({
+                profile,
+                threadType: chatType,
+                rawThreadId: message.threadId,
+                senderId,
+                senderName: senderDisplayName,
+                toId,
+                selfId,
+                title: chatType === "group" ? threadName : senderDisplayName,
+                msgId: message.data.msgId,
+                cliMsgId: message.data.cliMsgId,
+                actionId: getStringCandidate(messageData, ["actionId"]),
+                timestampMs,
+                msgType: msgType || undefined,
+                contentText: processedText || rawText || undefined,
+                contentJson:
+                  rawContent && typeof rawContent === "object" ? JSON.stringify(rawContent) : undefined,
+                quoteMsgId: quote?.globalMsgId ? String(quote.globalMsgId) : undefined,
+                quoteCliMsgId: quote?.cliMsgId ? String(quote.cliMsgId) : undefined,
+                quoteOwnerId: quote?.ownerId ? String(quote.ownerId) : undefined,
+                quoteText: quote?.msg,
+                media: mediaForDb,
+                mentions: mentionsForDb,
+                rawMessage: message.data,
+                rawPayload: payload,
+                source: "listen",
+              });
+
+              if (chatType === "group") {
+                await hydrateUnknownLiveGroup({
                   profile,
-                  threadType: chatType,
-                  rawThreadId: message.threadId,
-                  senderId,
+                  api,
+                  groupId: normalizedRecord.scopeThreadId,
+                  fallbackTitle: threadName,
+                });
+              } else {
+                await persistLiveDmContact({
+                  profile,
+                  api,
+                  peerId: normalizedRecord.scopeThreadId,
+                  senderDisplayName,
                   senderName: senderDisplayName,
-                  toId,
-                  selfId,
-                  title: threadName,
-                  msgId: message.data.msgId,
-                  cliMsgId: message.data.cliMsgId,
-                  actionId: getStringCandidate(messageData, ["actionId"]),
                   timestampMs,
-                  msgType: msgType || undefined,
-                  contentText: processedText || rawText || undefined,
-                  contentJson:
-                    rawContent && typeof rawContent === "object" ? JSON.stringify(rawContent) : undefined,
-                  quoteMsgId: quote?.globalMsgId ? String(quote.globalMsgId) : undefined,
-                  quoteCliMsgId: quote?.cliMsgId ? String(quote.cliMsgId) : undefined,
-                  quoteOwnerId: quote?.ownerId ? String(quote.ownerId) : undefined,
-                  quoteText: quote?.msg,
-                  media: mediaForDb,
-                  mentions: mentionsForDb,
-                  rawMessage: message.data,
-                  rawPayload: payload,
-                  source: "listen",
-                }),
-              );
+                  rawJson: JSON.stringify({
+                    userId: normalizedRecord.scopeThreadId,
+                    displayName: senderDisplayName,
+                  }),
+                });
+              }
+
+              await persistMessage(normalizedRecord);
             });
           }
 
