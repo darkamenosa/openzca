@@ -86,6 +86,8 @@ Group text sends resolve unique `@Name` or `@userId` mentions against the curren
 
 `msg video` attempts native video mode for a single `.mp4` input by generating or accepting a thumbnail, uploading both assets to Zalo, and calling the dedicated `sendVideo` API. If `ffmpeg` is unavailable, the input is unsupported, or native send fails, it falls back to the generic attachment flow.
 
+`msg voice` sends `--url` values directly. For local files, if `ffmpeg` and `OPENZCA_VOICE_PUBLISH_CMD` are available, the CLI normalizes the file to `.m4a`, runs the publish command with that temp file path, expects one public `http(s)` URL on stdout, and sends that URL. Otherwise it keeps using the legacy upload flow.
+
 ## Group Commands
 - `openzca group list [--json]`
 - `openzca group info <groupId>`

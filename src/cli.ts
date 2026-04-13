@@ -112,6 +112,11 @@ import {
 } from "./lib/text-send.js";
 import { parseTextStyles } from "./lib/text-styles.js";
 import { isFfmpegAvailable, planVideoSendMode, sendNativeVideo } from "./lib/video-send.js";
+import {
+  getVoicePublishCommandFromEnv,
+  normalizeVoiceForPublish,
+  publishVoiceFile,
+} from "./lib/voice-send.js";
 import { prepareReplyMessage, prepareStoredReplyMessage } from "./lib/reply.js";
 import { getSendRetryConfigFromEnv, retryable } from "./lib/send-retry.js";
 import { fetchAdaptiveObjectBatches } from "./lib/adaptive-batch.js";
@@ -5883,6 +5888,11 @@ msg
 
         const urlInputs = files.filter((entry) => isHttpUrl(entry));
         const localInputs = files.filter((entry) => !isHttpUrl(entry));
+        const publishCommand = getVoicePublishCommandFromEnv();
+        const ffmpegAvailable =
+          localInputs.length > 0 && publishCommand ? await isFfmpegAvailable() : false;
+        const usePublishFlow =
+          localInputs.length > 0 && Boolean(publishCommand) && ffmpegAvailable;
         writeDebugLine(
           "msg.voice.inputs",
           {
@@ -5890,52 +5900,109 @@ msg
             isGroup: Boolean(opts.group),
             localInputs,
             urlInputs,
+            publishConfigured: Boolean(publishCommand),
+            ffmpegAvailable: localInputs.length > 0 ? ffmpegAvailable : undefined,
+            mode: usePublishFlow ? "publish" : "legacy",
           },
           command,
         );
-        const downloaded = await downloadUrlsToTempFiles(urlInputs);
-        try {
-          const attachments = [...localInputs, ...downloaded.files];
-          await assertFilesExist(attachments);
+        await assertFilesExist(localInputs);
 
-          const results: unknown[] = [];
-          const uploaded = await api.uploadAttachment(attachments, threadId, type);
-          for (const item of uploaded) {
-            if (item.fileType === "others" || item.fileType === "video") {
-              results.push(await sendVoice({ voiceUrl: item.fileUrl }, threadId, type));
+        const publishedLocals: Array<{ mediaPath: string; mediaUrl: string }> = [];
+        let uploadedLocals: Awaited<ReturnType<API["uploadAttachment"]>> = [];
+
+        if (usePublishFlow) {
+          for (const localInput of localInputs) {
+            const normalized = await normalizeVoiceForPublish(localInput);
+            try {
+              const mediaUrl = await publishVoiceFile(publishCommand!, normalized.path);
+              publishedLocals.push({
+                mediaPath: localInput,
+                mediaUrl,
+              });
+            } finally {
+              await normalized.cleanup();
             }
           }
+        } else if (localInputs.length > 0) {
+          uploadedLocals = await withUploadListener(api, command, async () =>
+            api.uploadAttachment(localInputs, threadId, type),
+          );
+        }
 
-          if (results.length === 0) {
-            throw new Error(
-              "No valid voice attachment generated. Use an audio file (e.g. .aac, .mp3, .m4a, .wav, .ogg).",
-            );
+        const pendingPublished = [...publishedLocals];
+        const pendingUploaded = [...uploadedLocals];
+        const outboundVoices: Array<{
+          mediaPath?: string;
+          mediaUrl: string;
+          rawJson?: string;
+        }> = [];
+
+        for (const entry of files) {
+          if (isHttpUrl(entry)) {
+            outboundVoices.push({
+              mediaUrl: entry,
+            });
+            continue;
           }
 
-          output(results, false);
-          if (await shouldWriteToDb(profile)) {
-            scheduleDbWrite(profile, command, "msg.voice.db.persist_error", async () => {
-              await persistOutgoingMessageBestEffort({
-                profile,
-                api,
-                threadId,
-                group: opts.group,
-                msgType: "voice",
-                response: results,
-                rawPayload: uploaded,
-                media: uploaded.map((item) => ({
-                  mediaKind: "voice",
-                  mediaUrl:
-                    "fileUrl" in item && typeof item.fileUrl === "string"
-                      ? item.fileUrl
-                      : undefined,
-                  rawJson: JSON.stringify(item),
-                })),
-              });
+          if (usePublishFlow) {
+            const nextPublished = pendingPublished.shift();
+            if (!nextPublished) {
+              throw new Error(`Voice publish flow lost local file mapping for: ${entry}`);
+            }
+            outboundVoices.push(nextPublished);
+            continue;
+          }
+
+          const nextUploaded = pendingUploaded.shift();
+          if (!nextUploaded) {
+            throw new Error(`Voice upload flow lost local file mapping for: ${entry}`);
+          }
+          if (nextUploaded.fileType === "others" || nextUploaded.fileType === "video") {
+            outboundVoices.push({
+              mediaPath: entry,
+              mediaUrl: nextUploaded.fileUrl,
+              rawJson: JSON.stringify(nextUploaded),
             });
           }
-        } finally {
-          await downloaded.cleanup();
+        }
+
+        if (outboundVoices.length === 0) {
+          throw new Error(
+            "No valid voice attachment generated. Use an audio file (e.g. .aac, .mp3, .m4a, .wav, .ogg).",
+          );
+        }
+
+        const results: unknown[] = [];
+        for (const item of outboundVoices) {
+          results.push(await sendVoice({ voiceUrl: item.mediaUrl }, threadId, type));
+        }
+
+        output(results, false);
+        if (await shouldWriteToDb(profile)) {
+          scheduleDbWrite(profile, command, "msg.voice.db.persist_error", async () => {
+            await persistOutgoingMessageBestEffort({
+              profile,
+              api,
+              threadId,
+              group: opts.group,
+              msgType: "voice",
+              response: results,
+              rawPayload: {
+                mode: usePublishFlow ? "publish" : "legacy",
+                directUrls: urlInputs,
+                published: publishedLocals,
+                uploaded: uploadedLocals,
+              },
+              media: outboundVoices.map((item) => ({
+                mediaKind: "voice",
+                mediaPath: item.mediaPath,
+                mediaUrl: item.mediaUrl,
+                rawJson: item.rawJson,
+              })),
+            });
+          });
         }
       },
     ),

@@ -125,6 +125,7 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 
 Media commands accept local files, `file://` paths, and repeatable `--url` options. Add `--group` for group threads.
 `openzca msg video` attempts native video send for a single `.mp4` input by uploading the video and thumbnail to Zalo first. If `ffmpeg` is unavailable, the input is not a single `.mp4`, or native send fails, it falls back to the normal attachment send path. Use `--thumbnail <path-or-url>` to supply the preview image explicitly.
+`openzca msg voice` sends `--url` inputs directly. For local voice files, if both `ffmpeg` and `OPENZCA_VOICE_PUBLISH_CMD` are available, `openzca` normalizes the file to `.m4a`, runs the publish command with the normalized temp file path, expects one public `http(s)` URL on stdout, and sends that URL. Otherwise it falls back to the legacy Zalo upload flow.
 Local paths using `~` are expanded automatically (for positional file args, `--url`, and `OPENZCA_LISTEN_MEDIA_DIR`).
 Group text sends via `openzca msg send --group` resolve unique `@Name` or `@userId` mentions against the current group member list using member ids, display names, and usernames. Mention offsets are computed after formatting markers are parsed, so messages like `**@Alice Nguyen** hello` work. If multiple members share the same label, the command fails instead of guessing.
 When formatted text would produce an oversized outbound payload, `openzca msg send` automatically splits it into multiple sequential text messages using the final outbound text and rebased style/mention offsets. The split happens after formatting is parsed, using both rendered text length and estimated request payload size rather than the raw input string.
@@ -433,6 +434,10 @@ Upload/listener coordination overrides:
 - `OPENZCA_UPLOAD_GROUP_PROBE`: allow `msg upload` to probe `getGroupInfo` when auto thread-type detection is enabled.
   - Default: enabled.
   - Set to `0` to skip probe and rely only on cache matches.
+- `OPENZCA_VOICE_PUBLISH_CMD`: optional command used by `msg voice` for local files.
+  - `openzca` passes one normalized `.m4a` temp file path as the first argument.
+  - The command must print exactly one public `http(s)` URL to stdout.
+  - Requires `ffmpeg`; if unset or `ffmpeg` is unavailable, local voice files keep using the legacy Zalo upload flow.
 
 ### account — Multi-account profiles
 
