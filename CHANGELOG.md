@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.58] - 2026-04-13
+
+### Added
+
+- `msg voice` can publish local audio files through `OPENZCA_VOICE_PUBLISH_CMD` before sending, which enables a URL-first voice flow for mobile-compatible playback setups
+
+### Changed
+
+- Local voice publish mode normalizes source audio to `.m4a` with `ffmpeg` before calling the external publish command
+- `msg voice --url` now sends public audio URLs directly instead of downloading and re-uploading them first
+
 ## [0.1.55] - 2026-03-27
 
 ### Changed
