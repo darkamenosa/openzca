@@ -1,6 +1,6 @@
 {
   "name": "openzca",
-  "version": "0.1.57",
+  "version": "0.1.58",
   "description": "Open-source zca-compatible CLI to integrate Zalo with OpenClaw",
   "type": "module",
   "bin": {
