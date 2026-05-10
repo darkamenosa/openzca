@@ -1,10 +1,10 @@
-import fs from "node:fs/promises";
 import type { DatabaseSync } from "node:sqlite";
+import fs from "node:fs/promises";
 
-type Migration = {
-  version: string;
-  file: string;
-};
+interface Migration {
+  version: string
+  file: string
+}
 
 const MIGRATIONS: Migration[] = [
   { version: "001", file: "001-initial-schema.sql" },
@@ -31,7 +31,7 @@ function listAppliedVersions(db: DatabaseSync): Set<string> {
   const rows = db.prepare("SELECT version FROM schema_migrations").all() as Array<{ version?: unknown }>;
   return new Set(
     rows
-      .map((row) => (typeof row.version === "string" ? row.version : ""))
+      .map(row => (typeof row.version === "string" ? row.version : ""))
       .filter(Boolean),
   );
 }

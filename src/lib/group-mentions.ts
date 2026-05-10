@@ -1,18 +1,17 @@
 import type { Mention } from "zca-js";
 
-export type GroupMentionMember = {
-  userId: string;
-  displayName?: string;
-  zaloName?: string;
-};
+export interface GroupMentionMember {
+  userId: string
+  displayName?: string
+  zaloName?: string
+}
 
-type MentionCandidate = {
-  label: string;
-  normalizedLabel: string;
-  userId: string;
-};
+interface MentionCandidate {
+  label: string
+  normalizedLabel: string
+  userId: string
+}
 
-const WORD_LIKE_CHAR_RE = /[\p{L}\p{N}_]/u;
 const ALLOWED_START_BOUNDARY_CHARS = new Set(["(", "[", "{", "<", "\"", ",", ";", ":"]);
 const ALLOWED_END_BOUNDARY_CHARS = new Set([",", ";", ":", "!", "?", ")", "]", "}", ">", "\""]);
 
@@ -30,11 +29,14 @@ export function resolveOutboundGroupMentions(text: string, members: GroupMention
   const mentions: Mention[] = [];
 
   for (let index = 0; index < text.length; index += 1) {
-    if (text[index] !== "@") continue;
-    if (!isMentionStartBoundary(text, index)) continue;
+    if (text[index] !== "@")
+      continue;
+    if (!isMentionStartBoundary(text, index))
+      continue;
 
     const match = resolveMentionAtIndex(text, lowerText, index, candidates);
-    if (!match) continue;
+    if (!match)
+      continue;
 
     mentions.push({
       pos: index,
@@ -50,8 +52,10 @@ export function resolveOutboundGroupMentions(text: string, members: GroupMention
 
 export function hasPotentialOutboundGroupMention(text: string): boolean {
   for (let index = 0; index < text.length; index += 1) {
-    if (text[index] !== "@") continue;
-    if (!isMentionStartBoundary(text, index)) continue;
+    if (text[index] !== "@")
+      continue;
+    if (!isMentionStartBoundary(text, index))
+      continue;
 
     const next = text[index + 1];
     if (next && !/\s/u.test(next)) {
@@ -72,8 +76,8 @@ function resolveMentionAtIndex(
   const matches = candidates.filter((candidate) => {
     const end = start + candidate.label.length;
     return (
-      lowerText.startsWith(candidate.normalizedLabel, start) &&
-      isMentionBoundary(text, start, end)
+      lowerText.startsWith(candidate.normalizedLabel, start)
+      && isMentionBoundary(text, start, end)
     );
   });
 
@@ -82,8 +86,8 @@ function resolveMentionAtIndex(
   }
 
   const longestLength = matches.reduce((max, candidate) => Math.max(max, candidate.label.length), 0);
-  const longestMatches = matches.filter((candidate) => candidate.label.length === longestLength);
-  const matchedUserIds = [...new Set(longestMatches.map((candidate) => candidate.userId))];
+  const longestMatches = matches.filter(candidate => candidate.label.length === longestLength);
+  const matchedUserIds = [...new Set(longestMatches.map(candidate => candidate.userId))];
 
   if (matchedUserIds.length !== 1) {
     const label = text.slice(atIndex, start + longestLength);
@@ -98,15 +102,18 @@ function buildCandidates(members: GroupMentionMember[]): MentionCandidate[] {
 
   for (const member of members) {
     const userId = member.userId.trim();
-    if (!userId) continue;
+    if (!userId)
+      continue;
 
     for (const rawLabel of [member.userId, member.displayName, member.zaloName]) {
       const label = rawLabel?.trim();
-      if (!label) continue;
+      if (!label)
+        continue;
 
       const normalizedLabel = label.toLowerCase();
       const key = `${userId}\u0000${normalizedLabel}`;
-      if (candidates.has(key)) continue;
+      if (candidates.has(key))
+        continue;
 
       candidates.set(key, {
         label,
@@ -148,8 +155,4 @@ function isMentionStartBoundary(text: string, atIndex: number): boolean {
 
   const previous = text[atIndex - 1];
   return /\s/u.test(previous) || ALLOWED_START_BOUNDARY_CHARS.has(previous);
-}
-
-function isWordLikeChar(value: string): boolean {
-  return WORD_LIKE_CHAR_RE.test(value);
 }

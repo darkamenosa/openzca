@@ -1,27 +1,27 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { test } from "vitest";
 
 type PlanVideoSendMode = (params: {
-  files: string[];
-  ffmpegAvailable: boolean;
+  files: string[]
+  ffmpegAvailable: boolean
 }) => {
-  mode: "native" | "attachment";
-  reason?: string;
+  mode: "native" | "attachment"
+  reason?: string
 };
 
 type ParseVideoProbeOutput = (raw: string) => {
-  durationMs?: number;
-  width?: number;
-  height?: number;
+  durationMs?: number
+  width?: number
+  height?: number
 };
 
 async function loadVideoSendHelpers(): Promise<{
-  planVideoSendMode: PlanVideoSendMode;
-  parseVideoProbeOutput: ParseVideoProbeOutput;
+  planVideoSendMode: PlanVideoSendMode
+  parseVideoProbeOutput: ParseVideoProbeOutput
 }> {
   const loaded = (await import("./video-send.js").catch(() => ({}))) as {
-    planVideoSendMode?: PlanVideoSendMode;
-    parseVideoProbeOutput?: ParseVideoProbeOutput;
+    planVideoSendMode?: PlanVideoSendMode
+    parseVideoProbeOutput?: ParseVideoProbeOutput
   };
 
   assert.equal(typeof loaded.planVideoSendMode, "function");

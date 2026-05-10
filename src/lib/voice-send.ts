@@ -6,15 +6,15 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export type GeneratedVoiceFile = {
-  path: string;
-  cleanup: () => Promise<void>;
-};
+export interface GeneratedVoiceFile {
+  path: string
+  cleanup: () => Promise<void>
+}
 
 function sanitizeOutputBasename(filePath: string): string {
   const parsed = path.parse(filePath);
   const base = parsed.name.trim() || "voice";
-  const sanitized = base.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  const sanitized = base.replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "");
   return sanitized || "voice";
 }
 
@@ -44,7 +44,7 @@ export function getVoicePublishCommandFromEnv(env: NodeJS.ProcessEnv = process.e
 export function extractPublishedVoiceUrl(stdout: string): string {
   const lines = stdout
     .split(/\r?\n/)
-    .map((line) => line.trim())
+    .map(line => line.trim())
     .filter(Boolean);
 
   const candidate = lines.at(-1);

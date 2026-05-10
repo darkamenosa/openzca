@@ -1,15 +1,16 @@
-import { TextStyle, type Style } from "zca-js";
+import type { Style } from "zca-js";
+import { TextStyle } from "zca-js";
 
-type LineStyle = {
-  lineIndex: number;
-  style: TextStyle;
-  indentSize?: number;
-};
+interface LineStyle {
+  lineIndex: number
+  style: TextStyle
+  indentSize?: number
+}
 
-type Segment = {
-  text: string;
-  styles: TextStyle[];
-};
+interface Segment {
+  text: string
+  styles: TextStyle[]
+}
 
 const TAG_STYLE_MAP: Record<string, TextStyle | null> = {
   red: TextStyle.Red,
@@ -21,16 +22,16 @@ const TAG_STYLE_MAP: Record<string, TextStyle | null> = {
   underline: TextStyle.Underline,
 };
 
-const INLINE_MARKERS: { pattern: RegExp; style: TextStyle | null; extraStyles?: TextStyle[] }[] = [
+const INLINE_MARKERS: { pattern: RegExp, style: TextStyle | null, extraStyles?: TextStyle[] }[] = [
   {
     pattern: new RegExp(`\\{(${Object.keys(TAG_STYLE_MAP).join("|")})\\}(.+?)\\{/\\1\\}`, "g"),
     style: null,
   },
   { pattern: /\*\*\*(.+?)\*\*\*/g, style: TextStyle.Bold, extraStyles: [TextStyle.Italic] },
   { pattern: /\*\*(.+?)\*\*/g, style: TextStyle.Bold },
-  { pattern: /(?<!\w)__(.+?)__(?!\w)/g, style: TextStyle.Bold },
+  { pattern: /\b__(.+?)__\b/g, style: TextStyle.Bold },
   { pattern: /\*(.+?)\*/g, style: TextStyle.Italic },
-  { pattern: /(?<!\w)_(.+?)_(?!\w)/g, style: TextStyle.Italic },
+  { pattern: /\b_(.+?)_\b/g, style: TextStyle.Italic },
   { pattern: /~~(.+?)~~/g, style: TextStyle.StrikeThrough },
 ];
 
@@ -58,7 +59,7 @@ const INLINE_MARKERS: { pattern: RegExp; style: TextStyle | null; extraStyles?: 
  * leading indentation preserved via non-breaking spaces, and inline markdown
  * parsing disabled inside the block.
  */
-export function parseTextStyles(input: string): { text: string; styles: Style[] } {
+export function parseTextStyles(input: string): { text: string, styles: Style[] } {
   const allStyles: Style[] = [];
 
   const escapeMap: string[] = [];
@@ -78,7 +79,7 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
     let line = lines[lineIndex];
     let baseIndent = 0;
 
-    if (/^```/.test(line)) {
+    if (line.startsWith("```")) {
       inCodeBlock = !inCodeBlock;
       continue;
     }
@@ -101,12 +102,14 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
       continue;
     }
 
+    // eslint-disable-next-line regexp/no-super-linear-backtracking
     const quoteMatch = line.match(/^(>+)\s?(.*)$/);
     if (quoteMatch) {
       baseIndent = Math.min(5, quoteMatch[1].length);
       line = quoteMatch[2];
     }
 
+    // eslint-disable-next-line regexp/no-super-linear-backtracking
     const indentMatch = line.match(/^(\s+)(.*)$/);
     let indentLevel = 0;
     let content = line;
@@ -116,7 +119,7 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
     }
     const totalIndent = Math.min(5, baseIndent + indentLevel);
 
-    if (/^[-*+]\s\[[ xX]\]\s/.test(content)) {
+    if (/^[-*+]\s\[[ x]\]\s/i.test(content)) {
       if (totalIndent > 0) {
         lineStyles.push({ lineIndex, style: TextStyle.Indent, indentSize: totalIndent });
       }
@@ -171,8 +174,8 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
     for (const segment of segments) {
       let lastIndex = 0;
       const regex = new RegExp(marker.pattern.source, marker.pattern.flags);
-      let match: RegExpExecArray | null;
-      while ((match = regex.exec(segment.text)) !== null) {
+      let match = regex.exec(segment.text);
+      while (match !== null) {
         if (match.index > lastIndex) {
           nextSegments.push({
             text: segment.text.slice(lastIndex, match.index),
@@ -196,6 +199,7 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
           styles: combinedStyles,
         });
         lastIndex = regex.lastIndex;
+        match = regex.exec(segment.text);
       }
 
       if (lastIndex < segment.text.length) {
@@ -219,7 +223,7 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
     }
   }
 
-  const orphanMatches = [...plainText.matchAll(/\*([^*\n]+?)\*/g)];
+  const orphanMatches = [...plainText.matchAll(/\*([^*\n]+)\*/g)];
   for (let index = orphanMatches.length - 1; index >= 0; index -= 1) {
     const match = orphanMatches[index];
     const openPos = match.index ?? 0;
@@ -247,8 +251,9 @@ export function parseTextStyles(input: string): { text: string; styles: Style[] 
   }
 
   if (escapeMap.length > 0) {
+    // eslint-disable-next-line no-control-regex
     const escapeRegex = /\x01(\d+)\x02/g;
-    const shifts: { pos: number; delta: number }[] = [];
+    const shifts: { pos: number, delta: number }[] = [];
     let cumulativeDelta = 0;
 
     for (const match of plainText.matchAll(escapeRegex)) {
@@ -309,9 +314,8 @@ function clampIndent(spaceCount: number): number {
 }
 
 function normalizeCodeBlockLeadingWhitespace(line: string): string {
-  return line.replace(/^[ \t]+/, (leadingWhitespace) =>
+  return line.replace(/^[ \t]+/, leadingWhitespace =>
     leadingWhitespace
       .replace(/\t/g, "\u00A0\u00A0\u00A0\u00A0")
-      .replace(/ /g, "\u00A0"),
-  );
+      .replace(/ /g, "\u00A0"));
 }

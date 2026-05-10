@@ -58,7 +58,8 @@ function expandLeadingTilde(value: string): string {
 
 export function normalizeMediaInput(value: string): string {
   const trimmed = value.trim();
-  if (!trimmed) return "";
+  if (!trimmed)
+    return "";
 
   if (/^file:\/\//i.test(trimmed)) {
     try {
@@ -72,10 +73,11 @@ export function normalizeMediaInput(value: string): string {
 }
 
 export function normalizeInputList(values?: string[]): string[] {
-  if (!values || values.length === 0) return [];
+  if (!values || values.length === 0)
+    return [];
   return values
-    .flatMap((value) => value.split(","))
-    .map((value) => normalizeMediaInput(value))
+    .flatMap(value => value.split(","))
+    .map(value => normalizeMediaInput(value))
     .filter(Boolean);
 }
 
@@ -94,7 +96,8 @@ function inferExt(url: string, contentType: string | null): string {
   try {
     const pathname = new URL(url).pathname;
     const ext = path.extname(pathname);
-    if (ext) return ext;
+    if (ext)
+      return ext;
   } catch {
     // ignore
   }
@@ -104,7 +107,7 @@ function inferExt(url: string, contentType: string | null): string {
 
 export async function downloadUrlsToTempFiles(
   urls: string[],
-): Promise<{ files: string[]; cleanup: () => Promise<void> }> {
+): Promise<{ files: string[], cleanup: () => Promise<void> }> {
   if (urls.length === 0) {
     return {
       files: [],

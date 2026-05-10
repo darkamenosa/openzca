@@ -1,24 +1,22 @@
-import fs from "node:fs/promises";
+import type { API, Credentials, LoginQRCallback, Options } from "zca-js";
+import type { StoredCredentials } from "./types.js";
 import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { imageSize } from "image-size";
 import * as qrcodeTerminal from "qrcode-terminal";
 import {
   LoginQRCallbackEventType,
-  type API,
-  type Credentials,
-  type LoginQRCallback,
-  type Options,
   Zalo,
 } from "zca-js";
 import { loadCredentials, saveCredentials } from "./store.js";
-import type { StoredCredentials } from "./types.js";
 
 function renderInlineQrPngIfSupported(
   pngBase64: string,
   filePath: string,
 ): boolean {
-  if (!process.stdout.isTTY) return false;
+  if (!process.stdout.isTTY)
+    return false;
 
   try {
     const termProgram = (process.env.TERM_PROGRAM ?? "").toLowerCase();
@@ -26,25 +24,27 @@ function renderInlineQrPngIfSupported(
     const renderMode = (process.env.OPENZCA_QR_RENDER ?? "auto").toLowerCase();
     const debug = process.env.OPENZCA_QR_DEBUG === "1";
 
-    const shouldTryKitty =
-      renderMode === "kitty" ||
-      (renderMode === "auto" &&
-        (term.includes("ghostty") ||
-          term.includes("kitty") ||
-          termProgram.includes("ghostty") ||
-          termProgram.includes("wezterm")));
-    const shouldTryIterm =
-      renderMode === "iterm" ||
-      (renderMode === "auto" &&
-        termProgram === "iterm.app" &&
-        process.env.OPENZCA_QR_DISABLE_ITERM_INLINE !== "1");
+    const shouldTryKitty
+      = renderMode === "kitty"
+        || (renderMode === "auto"
+          && (term.includes("ghostty")
+            || term.includes("kitty")
+            || termProgram.includes("ghostty")
+            || termProgram.includes("wezterm")));
+    const shouldTryIterm
+      = renderMode === "iterm"
+        || (renderMode === "auto"
+          && termProgram === "iterm.app"
+          && process.env.OPENZCA_QR_DISABLE_ITERM_INLINE !== "1");
 
     // Ghostty/kitty/wezterm: kitty graphics protocol (chunked PNG payload).
     // This renders the exact qr.png bytes and is generally supported by these terminals.
     if (shouldTryKitty) {
-      if (debug) console.error("[openzca] QR render mode: kitty");
+      if (debug)
+        console.error("[openzca] QR render mode: kitty");
       const payload = pngBase64.replace(/\s+/g, "");
-      if (payload.length === 0) return false;
+      if (payload.length === 0)
+        return false;
       const chunkSize = 1024;
       for (let start = 0; start < payload.length; start += chunkSize) {
         const chunk = payload.slice(start, start + chunkSize);
@@ -60,10 +60,11 @@ function renderInlineQrPngIfSupported(
     // iTerm2 inline images (enabled by default on iTerm).
     // Set OPENZCA_QR_DISABLE_ITERM_INLINE=1 to force ASCII fallback.
     if (shouldTryIterm) {
-      if (debug) console.error("[openzca] QR render mode: iterm");
+      if (debug)
+        console.error("[openzca] QR render mode: iterm");
       const widthEnv = Number.parseInt(process.env.OPENZCA_QR_WIDTH ?? "", 10);
-      const widthCells =
-        Number.isFinite(widthEnv) && widthEnv >= 16 && widthEnv <= 80
+      const widthCells
+        = Number.isFinite(widthEnv) && widthEnv >= 16 && widthEnv <= 80
           ? widthEnv
           : 34;
       const encodedName = Buffer.from(path.basename(filePath)).toString("base64");
@@ -84,9 +85,12 @@ function renderInlineQrPngIfSupported(
 }
 
 function renderAsciiQrFromCode(code: string): boolean {
-  if (!process.stdout.isTTY) return false;
-  if (!code || !code.trim()) return false;
-  if (process.env.OPENZCA_QR_ASCII === "0") return false;
+  if (!process.stdout.isTTY)
+    return false;
+  if (!code || !code.trim())
+    return false;
+  if (process.env.OPENZCA_QR_ASCII === "0")
+    return false;
 
   try {
     qrcodeTerminal.generate(code, { small: true });
@@ -98,9 +102,9 @@ function renderAsciiQrFromCode(code: string): boolean {
 
 function quoteForShell(value: string): string {
   if (process.platform === "win32") {
-    return `"${value.replace(/"/g, '\\"')}"`;
+    return `"${value.replace(/"/g, "\\\"")}"`;
   }
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function formatOpenInstruction(filePath: string): string {
@@ -147,9 +151,9 @@ function tryOpenFile(filePath: string): boolean {
 }
 
 async function imageMetadataGetter(filePath: string): Promise<{
-  width: number;
-  height: number;
-  size: number;
+  width: number
+  height: number
+  size: number
 }> {
   const data = await fs.readFile(filePath);
   const info = imageSize(data);
@@ -218,7 +222,7 @@ export async function loginWithQrAndPersist(
   profileName: string,
   qrPath?: string,
   opts?: { openQr?: boolean },
-): Promise<{ api: API; credentials: Credentials }> {
+): Promise<{ api: API, credentials: Credentials }> {
   const zalo = createZaloClient();
   let captured: Credentials | null = null;
 
@@ -237,12 +241,12 @@ export async function loginWithQrAndPersist(
           ? renderAsciiQrFromCode(event.data.code)
           : false;
 
-        const autoOpenHeadless =
-          !process.stdout.isTTY && process.env.OPENZCA_QR_AUTO_OPEN !== "0";
-        const shouldOpen =
-          Boolean(opts?.openQr) ||
-          process.env.OPENZCA_QR_OPEN === "1" ||
-          autoOpenHeadless;
+        const autoOpenHeadless
+          = !process.stdout.isTTY && process.env.OPENZCA_QR_AUTO_OPEN !== "0";
+        const shouldOpen
+          = Boolean(opts?.openQr)
+            || process.env.OPENZCA_QR_OPEN === "1"
+            || autoOpenHeadless;
         if (shouldOpen) {
           const opened = tryOpenFile(absolutePath);
           if (opened) {

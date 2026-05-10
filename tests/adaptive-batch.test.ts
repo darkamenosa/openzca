@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { test } from "vitest";
 
 import { fetchAdaptiveObjectBatches } from "../src/lib/adaptive-batch.ts";
 
@@ -17,13 +17,13 @@ test("fetchAdaptiveObjectBatches splits oversized lookup batches until they succ
       if (keys.length > 5) {
         throw new Error("Tham số không hợp lệ");
       }
-      return Object.fromEntries(keys.map((key) => [key, { key }]));
+      return Object.fromEntries(keys.map(key => [key, { key }]));
     },
   });
 
   assert.equal(result.errors.length, 0);
   assert.deepEqual(Array.from(result.values.keys()), ids);
-  assert.deepEqual(calls.map((keys) => keys.length), [10, 5, 5, 2]);
+  assert.deepEqual(calls.map(keys => keys.length), [10, 5, 5, 2]);
 });
 
 test("fetchAdaptiveObjectBatches retries transient lookup failures", async () => {
@@ -61,7 +61,7 @@ test("fetchAdaptiveObjectBatches isolates a bad single item after splitting", as
       if (keys.includes("bad-group")) {
         throw new Error("Bad request");
       }
-      return Object.fromEntries(keys.map((key) => [key, { key }]));
+      return Object.fromEntries(keys.map(key => [key, { key }]));
     },
   });
 

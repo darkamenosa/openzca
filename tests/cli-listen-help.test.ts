@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import path from "node:path";
 import { spawnSync } from "node:child_process";
-import test from "node:test";
+import path from "node:path";
+import { test } from "vitest";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

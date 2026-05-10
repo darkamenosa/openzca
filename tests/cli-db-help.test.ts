@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
-import test from "node:test";
+import { onTestFinished, test, vi } from "vitest";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -44,9 +44,9 @@ function runDistCli(args: string[], env?: NodeJS.ProcessEnv) {
 }
 
 async function loadDbModule(tempHome: string) {
+  vi.resetModules();
   process.env.OPENZCA_HOME = tempHome;
-  const moduleUrl = `${pathToFileURL(path.join(repoRoot, "src/lib/db.ts")).href}?t=${Date.now()}-${Math.random()}`;
-  return import(moduleUrl);
+  return import("../src/lib/db.ts");
 }
 
 test("db help lists grouped subcommands", () => {
@@ -70,7 +70,7 @@ test("db reset requires --yes", () => {
   assert.match(result.stderr, /Refusing destructive operation without --yes in non-interactive mode/);
 });
 
-test("db status does not create sqlite file when disabled", { concurrency: false }, async () => {
+test("db status does not create sqlite file when disabled", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-cli-db-status-"));
   const profile = "db-status";
   const env = { OPENZCA_HOME: tempHome };
@@ -124,12 +124,12 @@ test("db contact help lists list find info and messages", () => {
   assert.match(result.stdout, /\bmessages\b/);
 });
 
-test("db contact subcommands honor -j JSON output", { concurrency: false }, async (t) => {
+test("db contact subcommands honor -j JSON output", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-cli-db-contact-json-"));
   const profile = "cli-db-contact-json";
   const env = { OPENZCA_HOME: tempHome };
 
-  t.after(async () => {
+  onTestFinished(async () => {
     await fs.rm(tempHome, { recursive: true, force: true });
   });
 
@@ -183,23 +183,23 @@ test("db contact subcommands honor -j JSON output", { concurrency: false }, asyn
 
   const listResult = runCli(["--profile", profile, "db", "contact", "list", "-j"], env);
   assert.equal(listResult.status, 0, listResult.stderr);
-  const listPayload = JSON.parse(listResult.stdout) as Array<{ userId: string; relationship: string }>;
+  const listPayload = JSON.parse(listResult.stdout) as Array<{ userId: string, relationship: string }>;
   assert.equal(listPayload[0]?.userId, "u1");
   assert.equal(listPayload[0]?.relationship, "seen_dm");
 
   const infoResult = runCli(["--profile", profile, "db", "contact", "info", "u1", "-j"], env);
   assert.equal(infoResult.status, 0, infoResult.stderr);
-  const infoPayload = JSON.parse(infoResult.stdout) as { userId: string; chatId: string };
+  const infoPayload = JSON.parse(infoResult.stdout) as { userId: string, chatId: string };
   assert.equal(infoPayload.userId, "u1");
   assert.equal(infoPayload.chatId, "u1");
 });
 
-test("db contact messages resolves the canonical chat id for legacy DM threads", { concurrency: false }, async (t) => {
+test("db contact messages resolves the canonical chat id for legacy DM threads", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-cli-db-contact-messages-"));
   const profile = "cli-db-contact-messages";
   const env = { OPENZCA_HOME: tempHome };
 
-  t.after(async () => {
+  onTestFinished(async () => {
     await fs.rm(tempHome, { recursive: true, force: true });
   });
 
@@ -262,10 +262,10 @@ test("db contact messages resolves the canonical chat id for legacy DM threads",
   const result = runCli(["--profile", profile, "db", "contact", "messages", "u1", "-j"], env);
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout) as {
-    userId: string;
-    chatId: string;
-    count: number;
-    messages: Array<{ msgId: string }>;
+    userId: string
+    chatId: string
+    count: number
+    messages: Array<{ msgId: string }>
   };
   assert.equal(payload.userId, "u1");
   assert.equal(payload.chatId, "legacy-u1");
@@ -273,18 +273,19 @@ test("db contact messages resolves the canonical chat id for legacy DM threads",
   assert.equal(payload.messages[0]?.msgId, "m1");
 });
 
-test("built dist CLI can enable DB and read DB status", { concurrency: false }, async (t) => {
+test("built dist CLI can enable DB and read DB status", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-cli-dist-db-"));
   const profile = "cli-dist-db";
   const env = { OPENZCA_HOME: tempHome };
 
-  t.after(async () => {
+  onTestFinished(async () => {
     await fs.rm(tempHome, { recursive: true, force: true });
   });
 
   const buildResult = spawnSync("npm", ["run", "build"], {
     cwd: repoRoot,
     encoding: "utf8",
+    shell: true,
     env: {
       ...process.env,
       ...env,
@@ -300,7 +301,7 @@ test("built dist CLI can enable DB and read DB status", { concurrency: false }, 
 
   const statusResult = runDistCli(["--profile", profile, "db", "status", "-j"], env);
   assert.equal(statusResult.status, 0, statusResult.stderr);
-  const payload = JSON.parse(statusResult.stdout) as { enabled: boolean; exists: boolean };
+  const payload = JSON.parse(statusResult.stdout) as { enabled: boolean, exists: boolean };
   assert.equal(payload.enabled, true);
   assert.equal(payload.exists, true);
 });
@@ -405,13 +406,13 @@ test("db group messages rejects mixing all and limit", () => {
   assert.match(result.stderr, /Use either --all or --limit/);
 });
 
-test("db chat messages infers stored group thread type", { concurrency: false }, async (t) => {
+test("db chat messages infers stored group thread type", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-cli-db-"));
   const profile = "cli-db";
   const env = { OPENZCA_HOME: tempHome };
   const db = await loadDbModule(tempHome);
 
-  t.after(async () => {
+  onTestFinished(async () => {
     delete process.env.OPENZCA_HOME;
     try {
       await db.closeDb(profile);
@@ -475,12 +476,12 @@ test("db chat messages infers stored group thread type", { concurrency: false },
   assert.match(aliasResult.stdout, /msgId: 'm1'/);
 });
 
-test("db chat subcommands honor -j JSON output", { concurrency: false }, async (t) => {
+test("db chat subcommands honor -j JSON output", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-cli-db-chat-json-"));
   const profile = "cli-db-json";
   const env = { OPENZCA_HOME: tempHome };
 
-  t.after(async () => {
+  onTestFinished(async () => {
     await fs.rm(tempHome, { recursive: true, force: true });
   });
 
@@ -542,21 +543,21 @@ test("db chat subcommands honor -j JSON output", { concurrency: false }, async (
   );
   assert.equal(messagesResult.status, 0, messagesResult.stderr);
   const messagesPayload = JSON.parse(messagesResult.stdout) as {
-    chatId: string;
-    count: number;
-    messages: Array<{ msgId: string }>;
+    chatId: string
+    count: number
+    messages: Array<{ msgId: string }>
   };
   assert.equal(messagesPayload.chatId, "u1");
   assert.equal(messagesPayload.count, 1);
   assert.equal(messagesPayload.messages[0]?.msgId, "m1");
 });
 
-test("db chat <id> aliases to db chat messages <id>", { concurrency: false }, async (t) => {
+test("db chat <id> aliases to db chat messages <id>", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-cli-test-"));
   const profile = "test-profile";
   const env = { ...process.env, OPENZCA_HOME: tempHome };
 
-  t.after(async () => {
+  onTestFinished(async () => {
     await fs.rm(tempHome, { recursive: true, force: true });
   });
 
@@ -607,9 +608,9 @@ test("db chat <id> aliases to db chat messages <id>", { concurrency: false }, as
   const aliasResult = runCli(["--profile", profile, "db", "chat", "u1", "-j"], env);
   assert.equal(aliasResult.status, 0, aliasResult.stderr);
   const aliasPayload = JSON.parse(aliasResult.stdout) as {
-    chatId: string;
-    count: number;
-    messages: Array<{ msgId: string }>;
+    chatId: string
+    count: number
+    messages: Array<{ msgId: string }>
   };
   assert.equal(aliasPayload.chatId, "u1");
   assert.equal(aliasPayload.count, 1);

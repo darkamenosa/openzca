@@ -117,7 +117,7 @@ You can also open the saved file manually (for example: `open qr.png` on macOS).
 | `openzca msg edit <msgId> <cliMsgId> <threadId> <message>` | Edit message (undo + resend shim) |
 | `openzca msg undo <msgId> <cliMsgId> <threadId>` | Recall a sent message |
 | `openzca msg upload <arg1> [arg2]` | Upload and send file(s) |
-| `openzca msg recent <threadId>` | List recent messages (`-n`, `--json`, newest-first); defaults to live history, supports `--source live|db|auto`; group mode prefers direct group-history endpoint (websocket fallback) |
+| `openzca msg recent <threadId>` | List recent messages (`-n`, `--json`, newest-first); defaults to live history, supports `--source` (live, db, auto); group mode prefers direct group-history endpoint (websocket fallback) |
 | `openzca msg pin <threadId>` | Pin a conversation |
 | `openzca msg unpin <threadId>` | Unpin a conversation |
 | `openzca msg list-pins` | List pinned conversations |

@@ -2,18 +2,17 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
-import { pathToFileURL } from "node:url";
+import { onTestFinished, test, vi } from "vitest";
 
 async function loadDbModule(tempHome: string) {
+  vi.resetModules();
   process.env.OPENZCA_HOME = tempHome;
-  const moduleUrl = `${pathToFileURL(path.join(process.cwd(), "src/lib/db.ts")).href}?t=${Date.now()}-${Math.random()}`;
-  return import(moduleUrl);
+  return import("../src/lib/db.ts");
 }
 
-test("resolveScopeThreadId keeps a stable DM peer id", { concurrency: false }, async (t) => {
+test("resolveScopeThreadId keeps a stable DM peer id", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-db-test-"));
-  t.after(async () => {
+  onTestFinished(async () => {
     delete process.env.OPENZCA_HOME;
     await fs.rm(tempHome, { recursive: true, force: true });
   });
@@ -43,12 +42,12 @@ test("resolveScopeThreadId keeps a stable DM peer id", { concurrency: false }, a
   );
 });
 
-test("persistMessage writes async rows that db recent returns newest-first", { concurrency: false }, async (t) => {
+test("persistMessage writes async rows that db recent returns newest-first", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-db-test-"));
   const profile = "test-profile";
   const db = await loadDbModule(tempHome);
 
-  t.after(async () => {
+  onTestFinished(async () => {
     delete process.env.OPENZCA_HOME;
     try {
       await db.closeDb(profile);
@@ -110,12 +109,12 @@ test("persistMessage writes async rows that db recent returns newest-first", { c
   assert.equal(rows[1].content, "older");
 });
 
-test("findContacts matches accent-insensitive names", { concurrency: false }, async (t) => {
+test("findContacts matches accent-insensitive names", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-db-test-"));
   const profile = "test-profile";
   const db = await loadDbModule(tempHome);
 
-  t.after(async () => {
+  onTestFinished(async () => {
     delete process.env.OPENZCA_HOME;
     try {
       await db.closeDb(profile);
@@ -141,12 +140,12 @@ test("findContacts matches accent-insensitive names", { concurrency: false }, as
   assert.equal(rows[0].relationship, "seen_dm");
 });
 
-test("findContacts supports simple glob patterns", { concurrency: false }, async (t) => {
+test("findContacts supports simple glob patterns", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-db-test-"));
   const profile = "test-profile";
   const db = await loadDbModule(tempHome);
 
-  t.after(async () => {
+  onTestFinished(async () => {
     delete process.env.OPENZCA_HOME;
     try {
       await db.closeDb(profile);
@@ -175,12 +174,12 @@ test("findContacts supports simple glob patterns", { concurrency: false }, async
   assert.equal(prefixRows[0].userId, "u1");
 });
 
-test("getDb reopens after a worker starts closing", { concurrency: false }, async (t) => {
+test("getDb reopens after a worker starts closing", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-db-test-"));
   const profile = "test-profile";
   const db = await loadDbModule(tempHome);
 
-  t.after(async () => {
+  onTestFinished(async () => {
     delete process.env.OPENZCA_HOME;
     try {
       await db.closeDb(profile);
@@ -210,12 +209,12 @@ test("getDb reopens after a worker starts closing", { concurrency: false }, asyn
   assert.equal(rows[0].userId, "u1");
 });
 
-test("legacy friends migrate into contacts on reopen", { concurrency: false }, async (t) => {
+test("legacy friends migrate into contacts on reopen", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-db-test-"));
   const profile = `test-profile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const db = await loadDbModule(tempHome);
 
-  t.after(async () => {
+  onTestFinished(async () => {
     delete process.env.OPENZCA_HOME;
     try {
       await db.closeDb(profile);
@@ -353,12 +352,12 @@ test("legacy friends migrate into contacts on reopen", { concurrency: false }, a
   assert.equal(legacy.displayName, "Legacy User");
 });
 
-test("legacy group members and dm threads backfill contacts on reopen", { concurrency: false }, async (t) => {
+test("legacy group members and dm threads backfill contacts on reopen", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-db-test-"));
   const profile = `test-profile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const db = await loadDbModule(tempHome);
 
-  t.after(async () => {
+  onTestFinished(async () => {
     delete process.env.OPENZCA_HOME;
     try {
       await db.closeDb(profile);
@@ -556,13 +555,13 @@ test("legacy group members and dm threads backfill contacts on reopen", { concur
   assert.equal(dmContact.displayName, "DM Person");
 });
 
-test("friend compatibility reads from contacts filtered by relationship", { concurrency: false }, async (t) => {
+test("friend compatibility reads from contacts filtered by relationship", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-db-test-"));
   const profile = "test-profile";
   const unique = Math.random().toString(36).slice(2, 10);
   const db = await loadDbModule(tempHome);
 
-  t.after(async () => {
+  onTestFinished(async () => {
     delete process.env.OPENZCA_HOME;
     try {
       await db.closeDb(profile);
@@ -592,12 +591,12 @@ test("friend compatibility reads from contacts filtered by relationship", { conc
   assert.equal(rows[0].relationship, "friend");
 });
 
-test("contact queries choose one active DM thread per user", { concurrency: false }, async (t) => {
+test("contact queries choose one active DM thread per user", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-db-test-"));
   const profile = `test-profile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const db = await loadDbModule(tempHome);
 
-  t.after(async () => {
+  onTestFinished(async () => {
     delete process.env.OPENZCA_HOME;
     try {
       await db.closeDb(profile);
@@ -660,12 +659,12 @@ test("contact queries choose one active DM thread per user", { concurrency: fals
   assert.equal(info.messageCount, 1);
 });
 
-test("reconcileFriendRelationships downgrades stale friends from current sync", { concurrency: false }, async (t) => {
+test("reconcileFriendRelationships downgrades stale friends from current sync", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-db-test-"));
   const profile = `test-profile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const db = await loadDbModule(tempHome);
 
-  t.after(async () => {
+  onTestFinished(async () => {
     delete process.env.OPENZCA_HOME;
     try {
       await db.closeDb(profile);
@@ -736,12 +735,12 @@ test("reconcileFriendRelationships downgrades stale friends from current sync", 
   assert.equal(none?.relationship, "unknown");
 });
 
-test("Database.close is idempotent", { concurrency: false }, async (t) => {
+test("Database.close is idempotent", async () => {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openzca-db-test-"));
   const profile = "test-profile";
   const db = await loadDbModule(tempHome);
 
-  t.after(async () => {
+  onTestFinished(async () => {
     delete process.env.OPENZCA_HOME;
     await fs.rm(tempHome, { recursive: true, force: true });
   });

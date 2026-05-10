@@ -1,57 +1,59 @@
-import { ThreadType, type Mention, type Style } from "zca-js";
+import type { Mention, Style } from "zca-js";
+import type { GroupMentionMember } from "./group-mentions.js";
 
+import { ThreadType } from "zca-js";
 import {
+
   hasPotentialOutboundGroupMention,
   resolveOutboundGroupMentions,
-  type GroupMentionMember,
 } from "./group-mentions.js";
 import { parseTextStyles } from "./text-styles.js";
 
 export const ZALO_TEXT_MESSAGE_MAX_LENGTH = 2000;
 export const ZALO_TEXT_REQUEST_PARAMS_MAX_ESTIMATE = 4000;
 
-export type TextSendPayload =
-  | string
-  | {
-      msg: string;
-      styles?: Style[];
-      mentions?: Mention[];
+export type TextSendPayload
+  = | string
+    | {
+      msg: string
+      styles?: Style[]
+      mentions?: Mention[]
     };
 
-export type TextSendPayloadAnalysis = {
-  payload: TextSendPayload;
+export interface TextSendPayloadAnalysis {
+  payload: TextSendPayload
   payloadObject: {
-    msg: string;
-    styles?: Style[];
-    mentions?: Mention[];
-  };
-  rawInputLength: number;
-  renderedTextLength: number;
-  styleCount: number;
-  mentionCount: number;
-  textPropertiesLength: number;
-  mentionInfoLength: number;
-  requestParamsLengthEstimate: number;
-  sendPath: "sms" | "sendmsg" | "mention";
-};
+    msg: string
+    styles?: Style[]
+    mentions?: Mention[]
+  }
+  rawInputLength: number
+  renderedTextLength: number
+  styleCount: number
+  mentionCount: number
+  textPropertiesLength: number
+  mentionInfoLength: number
+  requestParamsLengthEstimate: number
+  sendPath: "sms" | "sendmsg" | "mention"
+}
 
-type NormalizedTextSendPayload = {
-  msg: string;
-  styles?: Style[];
-  mentions?: Mention[];
-};
+interface NormalizedTextSendPayload {
+  msg: string
+  styles?: Style[]
+  mentions?: Mention[]
+}
 
-export type TextSendDeliveryPlan = {
-  chunks: TextSendPayload[];
-  analyses: TextSendPayloadAnalysis[];
-};
+export interface TextSendDeliveryPlan {
+  chunks: TextSendPayload[]
+  analyses: TextSendPayloadAnalysis[]
+}
 
 export async function buildTextSendPayload(params: {
-  message: string;
-  raw?: boolean;
-  threadType: ThreadType;
-  threadId: string;
-  listGroupMembers?: (threadId: string) => Promise<GroupMentionMember[]>;
+  message: string
+  raw?: boolean
+  threadType: ThreadType
+  threadId: string
+  listGroupMembers?: (threadId: string) => Promise<GroupMentionMember[]>
 }): Promise<TextSendPayload> {
   if (params.raw) {
     const mentions = await resolveGroupMentionsIfNeeded(params, params.message);
@@ -68,11 +70,11 @@ export async function buildTextSendPayload(params: {
 }
 
 export async function analyzeTextSendPayload(params: {
-  message: string;
-  raw?: boolean;
-  threadType: ThreadType;
-  threadId: string;
-  listGroupMembers?: (threadId: string) => Promise<GroupMentionMember[]>;
+  message: string
+  raw?: boolean
+  threadType: ThreadType
+  threadId: string
+  listGroupMembers?: (threadId: string) => Promise<GroupMentionMember[]>
 }): Promise<TextSendPayloadAnalysis> {
   const payload = await buildTextSendPayload(params);
   const payloadObject = normalizeTextSendPayload(payload);
@@ -109,11 +111,11 @@ export async function analyzeTextSendPayload(params: {
 }
 
 export function planTextSendPayloadsForDelivery(params: {
-  payload: TextSendPayload;
-  threadType: ThreadType;
-  threadId: string;
-  maxMessageLength?: number;
-  maxRequestParamsLengthEstimate?: number;
+  payload: TextSendPayload
+  threadType: ThreadType
+  threadId: string
+  maxMessageLength?: number
+  maxRequestParamsLengthEstimate?: number
 }): TextSendDeliveryPlan {
   const maxMessageLength = resolvePositiveLimit(
     params.maxMessageLength,
@@ -187,9 +189,9 @@ export function splitTextSendPayload(
 }
 
 function analyzePreparedTextSendPayload(params: {
-  payload: TextSendPayload;
-  threadType: ThreadType;
-  threadId: string;
+  payload: TextSendPayload
+  threadType: ThreadType
+  threadId: string
 }): TextSendPayloadAnalysis {
   const payloadObject = normalizeTextSendPayload(params.payload);
   const textProperties = buildTextProperties(payloadObject.styles);
@@ -226,9 +228,9 @@ function analyzePreparedTextSendPayload(params: {
 
 async function resolveGroupMentionsIfNeeded(
   params: {
-    threadType: ThreadType;
-    threadId: string;
-    listGroupMembers?: (threadId: string) => Promise<GroupMentionMember[]>;
+    threadType: ThreadType
+    threadId: string
+    listGroupMembers?: (threadId: string) => Promise<GroupMentionMember[]>
   },
   text: string,
 ): Promise<Mention[] | undefined> {
@@ -248,9 +250,9 @@ async function resolveGroupMentionsIfNeeded(
 }
 
 function normalizeTextSendPayload(payload: TextSendPayload): {
-  msg: string;
-  styles?: Style[];
-  mentions?: Mention[];
+  msg: string
+  styles?: Style[]
+  mentions?: Mention[]
 } {
   if (typeof payload === "string") {
     return { msg: payload };
@@ -259,12 +261,12 @@ function normalizeTextSendPayload(payload: TextSendPayload): {
 }
 
 function buildTextSendPayloadAnalysis(params: {
-  payloadObject: NormalizedTextSendPayload;
-  rawInputLength: number;
-  textProperties: string | undefined;
-  mentionInfo: string | undefined;
-  requestParamsLengthEstimate: number;
-  threadType: ThreadType;
+  payloadObject: NormalizedTextSendPayload
+  rawInputLength: number
+  textProperties: string | undefined
+  mentionInfo: string | undefined
+  requestParamsLengthEstimate: number
+  threadType: ThreadType
 }): Omit<TextSendPayloadAnalysis, "payload"> {
   return {
     payloadObject: params.payloadObject,
@@ -287,38 +289,38 @@ function buildTextSendPayloadAnalysis(params: {
 function isTextSendPayloadWithinDeliveryLimits(
   analysis: TextSendPayloadAnalysis,
   limits: {
-    maxMessageLength: number;
-    maxRequestParamsLengthEstimate: number;
+    maxMessageLength: number
+    maxRequestParamsLengthEstimate: number
   },
 ): boolean {
   return (
-    analysis.renderedTextLength <= limits.maxMessageLength &&
-    analysis.requestParamsLengthEstimate <= limits.maxRequestParamsLengthEstimate
+    analysis.renderedTextLength <= limits.maxMessageLength
+    && analysis.requestParamsLengthEstimate <= limits.maxRequestParamsLengthEstimate
   );
 }
 
 function computeNextChunkLength(
   analysis: TextSendPayloadAnalysis,
   limits: {
-    maxMessageLength: number;
-    maxRequestParamsLengthEstimate: number;
+    maxMessageLength: number
+    maxRequestParamsLengthEstimate: number
   },
 ): number {
   const currentLength = analysis.renderedTextLength;
-  const targetLengths = [limits.maxMessageLength, currentLength - 1].filter((value) => value > 0);
+  const targetLengths = [limits.maxMessageLength, currentLength - 1].filter(value => value > 0);
 
   if (analysis.requestParamsLengthEstimate > limits.maxRequestParamsLengthEstimate) {
     targetLengths.push(
       Math.floor(
-        (currentLength * limits.maxRequestParamsLengthEstimate) /
-          analysis.requestParamsLengthEstimate,
+        (currentLength * limits.maxRequestParamsLengthEstimate)
+        / analysis.requestParamsLengthEstimate,
       ),
     );
   }
 
   const targetLength = Math.max(
     1,
-    Math.min(...targetLengths.filter((value) => Number.isFinite(value) && value > 0)),
+    Math.min(...targetLengths.filter(value => Number.isFinite(value) && value > 0)),
   );
 
   return Math.min(targetLength, currentLength - 1);
@@ -401,8 +403,8 @@ function sliceMentions(
   }
 
   const sliced = mentions
-    .filter((mention) => mention.pos >= start && mention.pos + mention.len <= end)
-    .map((mention) => ({
+    .filter(mention => mention.pos >= start && mention.pos + mention.len <= end)
+    .map(mention => ({
       pos: mention.pos - start,
       uid: mention.uid,
       len: mention.len,
@@ -524,7 +526,7 @@ function buildMentionInfo(
 
   let totalMentionLen = 0;
   const mentionsFinal = mentions
-    .filter((mention) => mention.pos >= 0 && Boolean(mention.uid) && mention.len > 0)
+    .filter(mention => mention.pos >= 0 && Boolean(mention.uid) && mention.len > 0)
     .map((mention) => {
       totalMentionLen += mention.len;
       return {

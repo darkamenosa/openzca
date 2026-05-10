@@ -1,17 +1,17 @@
 export type RetryPredicate = (error: unknown) => boolean;
 
-export type RetryableOptions<TArgs extends unknown[]> = {
-  number?: number;
-  delayMs?: number;
-  on?: RetryPredicate;
+export interface RetryableOptions<TArgs extends unknown[]> {
+  number?: number
+  delayMs?: number
+  on?: RetryPredicate
   onRetry?: (context: {
-    attempt: number;
-    maxRetries: number;
-    delayMs: number;
-    error: unknown;
-    args: TArgs;
-  }) => void | Promise<void>;
-};
+    attempt: number
+    maxRetries: number
+    delayMs: number
+    error: unknown
+    args: TArgs
+  }) => void | Promise<void>
+}
 
 export type SendRetryConfig = Pick<RetryableOptions<unknown[]>, "number" | "delayMs">;
 
@@ -37,8 +37,10 @@ function sleep(ms: number): Promise<void> {
 
 function parsePositiveIntEnv(value: string | undefined, fallback: number): number {
   const raw = value?.trim();
-  if (!raw) return fallback;
-  if (raw === "0") return 0;
+  if (!raw)
+    return fallback;
+  if (raw === "0")
+    return 0;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
@@ -52,7 +54,7 @@ export function getSendRetryConfigFromEnv(env = process.env): SendRetryConfig {
 
 export function isRetryableSendError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? "");
-  return RETRYABLE_SEND_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+  return RETRYABLE_SEND_ERROR_PATTERNS.some(pattern => pattern.test(message));
 }
 
 export function retryable<TArgs extends unknown[], TResult>(

@@ -1,29 +1,29 @@
-export type AdaptiveBatchLookupError = {
-  key: string;
-  error: unknown;
-};
+export interface AdaptiveBatchLookupError {
+  key: string
+  error: unknown
+}
 
-export type AdaptiveBatchRetryContext = {
-  keys: string[];
-  attempt: number;
-  maxRetries: number;
-  delayMs: number;
-  error: unknown;
-};
+export interface AdaptiveBatchRetryContext {
+  keys: string[]
+  attempt: number
+  maxRetries: number
+  delayMs: number
+  error: unknown
+}
 
-export type FetchAdaptiveObjectBatchesOptions<TValue> = {
-  fetchBatch: (keys: string[]) => Promise<Record<string, TValue | undefined> | undefined>;
-  initialBatchSize?: number;
-  maxRetries?: number;
-  retryDelayMs?: number;
-  batchDelayMs?: number;
-  backoffMultiplier?: number;
-  shouldRetry?: (error: unknown) => boolean;
-  shouldSplit?: (error: unknown) => boolean;
-  continueOnItemError?: boolean;
-  onRetry?: (context: AdaptiveBatchRetryContext) => void | Promise<void>;
-  onItemError?: (context: AdaptiveBatchLookupError) => void | Promise<void>;
-};
+export interface FetchAdaptiveObjectBatchesOptions<TValue> {
+  fetchBatch: (keys: string[]) => Promise<Record<string, TValue | undefined> | undefined>
+  initialBatchSize?: number
+  maxRetries?: number
+  retryDelayMs?: number
+  batchDelayMs?: number
+  backoffMultiplier?: number
+  shouldRetry?: (error: unknown) => boolean
+  shouldSplit?: (error: unknown) => boolean
+  continueOnItemError?: boolean
+  onRetry?: (context: AdaptiveBatchRetryContext) => void | Promise<void>
+  onItemError?: (context: AdaptiveBatchLookupError) => void | Promise<void>
+}
 
 const RETRYABLE_LOOKUP_ERROR_PATTERNS = [
   /retry limit/i,
@@ -67,12 +67,12 @@ function toErrorText(error: unknown): string {
 
 export function isRetryableLookupError(error: unknown): boolean {
   const message = toErrorText(error);
-  return RETRYABLE_LOOKUP_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+  return RETRYABLE_LOOKUP_ERROR_PATTERNS.some(pattern => pattern.test(message));
 }
 
 export function isSplittableLookupError(error: unknown): boolean {
   const message = toErrorText(error);
-  return SPLITTABLE_LOOKUP_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+  return SPLITTABLE_LOOKUP_ERROR_PATTERNS.some(pattern => pattern.test(message));
 }
 
 async function runAdaptiveBatch<TValue>(
@@ -116,8 +116,8 @@ async function runAdaptiveBatch<TValue>(
 export async function fetchAdaptiveObjectBatches<TValue>(
   keys: readonly string[],
   options: FetchAdaptiveObjectBatchesOptions<TValue>,
-): Promise<{ values: Map<string, TValue>; errors: AdaptiveBatchLookupError[] }> {
-  const uniqueKeys = Array.from(new Set(keys.map((value) => value.trim()).filter(Boolean)));
+): Promise<{ values: Map<string, TValue>, errors: AdaptiveBatchLookupError[] }> {
+  const uniqueKeys = Array.from(new Set(keys.map(value => value.trim()).filter(Boolean)));
   const pending = chunkKeys(uniqueKeys, options.initialBatchSize ?? 5);
   const values = new Map<string, TValue>();
   const errors: AdaptiveBatchLookupError[] = [];

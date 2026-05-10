@@ -1,37 +1,37 @@
+import type { GroupMentionMember } from "./group-mentions.js";
 import assert from "node:assert/strict";
-import test from "node:test";
+
+import { test } from "vitest";
 
 import { TextStyle, ThreadType } from "zca-js";
 
-import type { GroupMentionMember } from "./group-mentions.js";
-
 type BuildTextSendPayload = (params: {
-  message: string;
-  raw?: boolean;
-  threadType: ThreadType;
-  threadId: string;
-  listGroupMembers?: (threadId: string) => Promise<GroupMentionMember[]>;
+  message: string
+  raw?: boolean
+  threadType: ThreadType
+  threadId: string
+  listGroupMembers?: (threadId: string) => Promise<GroupMentionMember[]>
 }) => Promise<unknown>;
 
 type SplitTextSendPayload = (payload: unknown, maxLength?: number) => unknown[];
 type PlanTextSendPayloadsForDelivery = (params: {
-  payload: unknown;
-  threadType: ThreadType;
-  threadId: string;
-  maxMessageLength?: number;
-  maxRequestParamsLengthEstimate?: number;
+  payload: unknown
+  threadType: ThreadType
+  threadId: string
+  maxMessageLength?: number
+  maxRequestParamsLengthEstimate?: number
 }) => {
-  chunks: unknown[];
+  chunks: unknown[]
   analyses: Array<{
-    renderedTextLength: number;
-    textPropertiesLength: number;
-    requestParamsLengthEstimate: number;
-  }>;
+    renderedTextLength: number
+    textPropertiesLength: number
+    requestParamsLengthEstimate: number
+  }>
 };
 
 async function loadBuilder(): Promise<BuildTextSendPayload> {
   const loaded = (await import("./text-send.js").catch(() => ({}))) as {
-    buildTextSendPayload?: BuildTextSendPayload;
+    buildTextSendPayload?: BuildTextSendPayload
   };
   assert.equal(typeof loaded.buildTextSendPayload, "function");
   return loaded.buildTextSendPayload!;
@@ -39,7 +39,7 @@ async function loadBuilder(): Promise<BuildTextSendPayload> {
 
 async function loadSplitter(): Promise<SplitTextSendPayload> {
   const loaded = (await import("./text-send.js").catch(() => ({}))) as {
-    splitTextSendPayload?: SplitTextSendPayload;
+    splitTextSendPayload?: SplitTextSendPayload
   };
   assert.equal(typeof loaded.splitTextSendPayload, "function");
   return loaded.splitTextSendPayload!;
@@ -47,7 +47,7 @@ async function loadSplitter(): Promise<SplitTextSendPayload> {
 
 async function loadDeliveryPlanner(): Promise<PlanTextSendPayloadsForDelivery> {
   const loaded = (await import("./text-send.js").catch(() => ({}))) as {
-    planTextSendPayloadsForDelivery?: PlanTextSendPayloadsForDelivery;
+    planTextSendPayloadsForDelivery?: PlanTextSendPayloadsForDelivery
   };
   assert.equal(typeof loaded.planTextSendPayloadsForDelivery, "function");
   return loaded.planTextSendPayloadsForDelivery!;

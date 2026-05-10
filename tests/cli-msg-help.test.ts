@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import path from "node:path";
 import { spawnSync } from "node:child_process";
-import test from "node:test";
+import path from "node:path";
+import { test } from "vitest";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -39,12 +39,12 @@ test("msg analyze-text returns json analysis for formatted text without auth", (
 
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout) as {
-    rawInputLength: number;
-    renderedTextLength: number;
-    styleCount: number;
-    textPropertiesLength: number;
-    sendPath: string;
-    payloadObject: { msg: string; styles?: Array<{ st: string; start: number; len: number }> };
+    rawInputLength: number
+    renderedTextLength: number
+    styleCount: number
+    textPropertiesLength: number
+    sendPath: string
+    payloadObject: { msg: string, styles?: Array<{ st: string, start: number, len: number }> }
   };
 
   assert.equal(payload.rawInputLength, 6);

@@ -1,26 +1,26 @@
-import assert from "node:assert/strict";
-import test from "node:test";
-
 import type { Mention } from "zca-js";
+import assert from "node:assert/strict";
+
+import { test } from "vitest";
 
 import { parseTextStyles } from "./text-styles.js";
 
-type GroupMentionMember = {
-  userId: string;
-  displayName?: string;
-  zaloName?: string;
-};
+interface GroupMentionMember {
+  userId: string
+  displayName?: string
+  zaloName?: string
+}
 
 type ResolveOutboundGroupMentions = (text: string, members: GroupMentionMember[]) => Mention[];
 type HasPotentialOutboundGroupMention = (text: string) => boolean;
 
 async function loadModule(): Promise<{
-  resolveOutboundGroupMentions: ResolveOutboundGroupMentions;
-  hasPotentialOutboundGroupMention?: HasPotentialOutboundGroupMention;
+  resolveOutboundGroupMentions: ResolveOutboundGroupMentions
+  hasPotentialOutboundGroupMention?: HasPotentialOutboundGroupMention
 }> {
   const loaded = (await import("./group-mentions.js").catch(() => ({}))) as {
-    resolveOutboundGroupMentions?: ResolveOutboundGroupMentions;
-    hasPotentialOutboundGroupMention?: HasPotentialOutboundGroupMention;
+    resolveOutboundGroupMentions?: ResolveOutboundGroupMentions
+    hasPotentialOutboundGroupMention?: HasPotentialOutboundGroupMention
   };
   assert.equal(typeof loaded.resolveOutboundGroupMentions, "function");
   return {

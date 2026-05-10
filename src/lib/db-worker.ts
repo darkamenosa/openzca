@@ -1,4 +1,3 @@
-import { parentPort, workerData } from "node:worker_threads";
 import type { DatabaseSync, SQLInputValue, StatementResultingChanges } from "node:sqlite";
 import type {
   DbStatement,
@@ -6,13 +5,14 @@ import type {
   DbWorkerResponse,
   SerializedDbError,
 } from "./db-protocol.js";
+import { parentPort, workerData } from "node:worker_threads";
 
 type SqliteModule = typeof import("node:sqlite");
 type MigrationModule = typeof import("./db-migrations.js");
 
-type WorkerData = {
-  filename: string;
-};
+interface WorkerData {
+  filename: string
+}
 
 if (!parentPort) {
   throw new Error("DB worker requires parentPort");
@@ -40,6 +40,7 @@ function serializeError(error: unknown): SerializedDbError {
 
 async function loadSqliteModule(): Promise<SqliteModule> {
   const originalEmitWarning = process.emitWarning;
+  // eslint-disable-next-line no-new-func
   const importDynamic = new Function("specifier", "return import(specifier);") as (
     specifier: string,
   ) => Promise<SqliteModule>;
@@ -63,6 +64,7 @@ async function loadMigrationModule(): Promise<MigrationModule> {
   const specifier = currentUrl.pathname.endsWith("/src/lib/db-worker.ts")
     ? new URL("./db-migrations.ts", currentUrl).href
     : new URL("./db-migrations.js", currentUrl).href;
+  // eslint-disable-next-line no-new-func
   const importDynamic = new Function("specifier", "return import(specifier);") as (
     specifier: string,
   ) => Promise<MigrationModule>;
@@ -71,7 +73,7 @@ async function loadMigrationModule(): Promise<MigrationModule> {
 
 function setDefensiveMode(db: DatabaseSync): void {
   const maybeDb = db as DatabaseSync & {
-    enableDefensive?: (active: boolean) => void;
+    enableDefensive?: (active: boolean) => void
   };
   if (typeof maybeDb.enableDefensive === "function") {
     maybeDb.enableDefensive(true);
@@ -185,7 +187,6 @@ async function main(): Promise<void> {
             result: null,
           } satisfies DbWorkerResponse);
           setImmediate(() => process.exit(0));
-          return;
       }
     } catch (error) {
       port.postMessage({
