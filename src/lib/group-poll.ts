@@ -1,14 +1,14 @@
 import type { CreatePollOptions } from "zca-js";
 
-export type CreateGroupPollCliOptions = {
-  question?: string;
-  option?: string[];
-  multi?: boolean;
-  allowAddOption?: boolean;
-  hideVotePreview?: boolean;
-  anonymous?: boolean;
-  expireMs?: string;
-};
+export interface CreateGroupPollCliOptions {
+  question?: string
+  option?: string[]
+  multi?: boolean
+  allowAddOption?: boolean
+  hideVotePreview?: boolean
+  anonymous?: boolean
+  expireMs?: string
+}
 
 function parsePositiveInteger(value: string, label: string): number {
   const normalized = value.trim();
@@ -33,7 +33,7 @@ function requireQuestion(value?: string): string {
 }
 
 function normalizeOptions(values?: string[]): string[] {
-  const normalized = (values ?? []).map((value) => value.trim());
+  const normalized = (values ?? []).map(value => value.trim());
   if (normalized.length < 2) {
     throw new Error("Poll must include at least two options.");
   }
@@ -56,7 +56,7 @@ export function parsePollOptionIds(values?: string[]): number[] {
   if (optionIds.length === 0) {
     throw new Error("Provide at least one option id.");
   }
-  return optionIds.map((value) => parsePositiveInteger(value, "Option id"));
+  return optionIds.map(value => parsePositiveInteger(value, "Option id"));
 }
 
 export function buildCreatePollOptions(

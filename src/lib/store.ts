@@ -1,12 +1,12 @@
+import type { ProfileCachePayload, ProfilesDb, StoredCredentials } from "./types.js";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ProfileCachePayload, ProfilesDb, StoredCredentials } from "./types.js";
 
-const PROFILE_NAME_RE = /^[A-Za-z0-9_-]+$/;
+const PROFILE_NAME_RE = /^[\w-]+$/;
 
-export const APP_HOME =
-  process.env.OPENZCA_HOME && process.env.OPENZCA_HOME.trim().length > 0
+export const APP_HOME
+  = process.env.OPENZCA_HOME && process.env.OPENZCA_HOME.trim().length > 0
     ? process.env.OPENZCA_HOME
     : path.join(os.homedir(), ".openzca");
 
@@ -64,7 +64,8 @@ export function getCacheMetaPath(name: string): string {
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
-  if (!(await fileExists(filePath))) return null;
+  if (!(await fileExists(filePath)))
+    return null;
   const raw = await fs.readFile(filePath, "utf8");
   return JSON.parse(raw) as T;
 }
@@ -183,11 +184,11 @@ export async function removeProfile(name: string): Promise<void> {
 export async function resolveProfileName(flagProfile?: string): Promise<string> {
   const db = await ensureProfilesDb();
 
-  const picked =
-    (flagProfile && flagProfile.trim()) ||
-    (process.env.OPENZCA_PROFILE?.trim() || process.env.ZCA_PROFILE?.trim()) ||
-    db.defaultProfile ||
-    DEFAULT_PROFILE;
+  const picked
+    = (flagProfile && flagProfile.trim())
+      || (process.env.OPENZCA_PROFILE?.trim() || process.env.ZCA_PROFILE?.trim())
+      || db.defaultProfile
+      || DEFAULT_PROFILE;
 
   if (!db.profiles[picked]) {
     if (picked === DEFAULT_PROFILE) {
@@ -232,15 +233,15 @@ export async function writeCache(
 }
 
 export async function readCache(profileName: string): Promise<{
-  friends: unknown[];
-  groups: unknown[];
-  updatedAt: string | null;
+  friends: unknown[]
+  groups: unknown[]
+  updatedAt: string | null
 }> {
-  const friends =
-    (await readJsonFile<unknown[]>(getFriendsCachePath(profileName))) ?? [];
+  const friends
+    = (await readJsonFile<unknown[]>(getFriendsCachePath(profileName))) ?? [];
   const groups = (await readJsonFile<unknown[]>(getGroupsCachePath(profileName))) ?? [];
-  const meta =
-    (await readJsonFile<{ updatedAt?: string }>(getCacheMetaPath(profileName))) ?? null;
+  const meta
+    = (await readJsonFile<{ updatedAt?: string }>(getCacheMetaPath(profileName))) ?? null;
 
   return {
     friends,

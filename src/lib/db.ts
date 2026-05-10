@@ -1,12 +1,9 @@
+import type { DbStatement, DbWorkerRequest, DbWorkerResponse, SerializedDbError } from "./db-protocol.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
-import { createRequire } from "node:module";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
-import type { DbStatement, DbWorkerRequest, DbWorkerResponse, SerializedDbError } from "./db-protocol.js";
 import { getProfileDir } from "./store.js";
-
-const require = createRequire(import.meta.url);
 
 function buildDbError(error: SerializedDbError): Error & { code?: string } {
   const built = new Error(error.message) as Error & { code?: string };
@@ -16,17 +13,12 @@ function buildDbError(error: SerializedDbError): Error & { code?: string } {
   return built;
 }
 
-function resolveWorkerSpec(): { url: URL; execArgv?: string[] } {
+function resolveWorkerSpec(): { url: URL, execArgv: string[] } {
   const currentUrl = new URL(import.meta.url);
-  if (currentUrl.pathname.endsWith("/src/lib/db.ts")) {
-    return {
-      url: new URL("./db-worker.ts", currentUrl),
-      execArgv: ["--import", require.resolve("tsx")],
-    };
+  if (currentUrl.pathname.includes("/src/lib/db.ts")) {
+    return { url: new URL("../../dist/db-worker.js", currentUrl), execArgv: [] };
   }
-  return {
-    url: new URL("./db-worker.js", currentUrl),
-  };
+  return { url: new URL("./db-worker.js", currentUrl), execArgv: [] };
 }
 
 class Database {
@@ -39,9 +31,10 @@ class Database {
   #idleTimer: NodeJS.Timeout | undefined;
   #closePromise: Promise<void> | undefined;
   #pending = new Map<number, {
-    resolve: (value: unknown) => void;
-    reject: (reason?: unknown) => void;
+    resolve: (value: unknown) => void
+    reject: (reason?: unknown) => void
   }>();
+
   readonly #ready: Promise<void>;
   readonly #exited: Promise<void>;
   readonly #releaseConnection: () => void;
@@ -117,9 +110,9 @@ class Database {
       execArgv,
       workerData: { filename },
     });
-    worker.unref();
     const db = new Database(worker, onClosed);
     await db.#ready;
+    worker.unref();
     return db;
   }
 
@@ -172,6 +165,7 @@ class Database {
     const result = new Promise<unknown>((resolve, reject) => {
       this.#pending.set(id, { resolve, reject });
     });
+    this.#worker.ref();
     try {
       this.#worker.postMessage(request);
     } catch (error) {
@@ -182,8 +176,11 @@ class Database {
       return await result;
     } finally {
       this.#activeRequests -= 1;
-      if (this.#activeRequests === 0 && !this.#closed && !this.#closing) {
-        this.#scheduleIdleClose();
+      if (this.#activeRequests === 0) {
+        if (!this.#closed && !this.#closing) {
+          this.#worker.unref();
+          this.#scheduleIdleClose();
+        }
       }
     }
   }
@@ -192,10 +189,10 @@ class Database {
     await this.#request("exec", { sql });
   }
 
-  async run(sql: string, params: DbStatement["params"] = []): Promise<{ changes: number; lastInsertRowid: number | bigint }> {
+  async run(sql: string, params: DbStatement["params"] = []): Promise<{ changes: number, lastInsertRowid: number | bigint }> {
     return await this.#request("run", { sql, params }) as {
-      changes: number;
-      lastInsertRowid: number | bigint;
+      changes: number
+      lastInsertRowid: number | bigint
     };
   }
 
@@ -231,190 +228,190 @@ class Database {
   }
 }
 
-export type DbConfig = {
-  enabled: boolean;
-  path?: string;
-  updatedAt: string;
-};
+export interface DbConfig {
+  enabled: boolean
+  path?: string
+  updatedAt: string
+}
 
 export type DbThreadType = "group" | "user";
 
-export type DbMention = {
-  uid: string;
-  pos?: number;
-  len?: number;
-  type?: number;
-  rawJson?: string;
-};
+export interface DbMention {
+  uid: string
+  pos?: number
+  len?: number
+  type?: number
+  rawJson?: string
+}
 
-export type DbMedia = {
-  mediaKind?: string;
-  mediaUrl?: string;
-  mediaPath?: string;
-  mediaType?: string;
-  rawJson?: string;
-};
+export interface DbMedia {
+  mediaKind?: string
+  mediaUrl?: string
+  mediaPath?: string
+  mediaType?: string
+  rawJson?: string
+}
 
-export type DbThreadRecord = {
-  profile: string;
-  scopeThreadId: string;
-  rawThreadId: string;
-  threadType: DbThreadType;
-  peerId?: string;
-  title?: string;
-  isPinned?: boolean;
-  isHidden?: boolean;
-  isArchived?: boolean;
-  rawJson?: string;
-};
+export interface DbThreadRecord {
+  profile: string
+  scopeThreadId: string
+  rawThreadId: string
+  threadType: DbThreadType
+  peerId?: string
+  title?: string
+  isPinned?: boolean
+  isHidden?: boolean
+  isArchived?: boolean
+  rawJson?: string
+}
 
-export type DbThreadMemberRecord = {
-  profile: string;
-  scopeThreadId: string;
-  userId: string;
-  displayName?: string;
-  zaloName?: string;
-  avatar?: string;
-  accountStatus?: number;
-  memberType?: number;
-  rawJson?: string;
-  snapshotAtMs: number;
-};
+export interface DbThreadMemberRecord {
+  profile: string
+  scopeThreadId: string
+  userId: string
+  displayName?: string
+  zaloName?: string
+  avatar?: string
+  accountStatus?: number
+  memberType?: number
+  rawJson?: string
+  snapshotAtMs: number
+}
 
 export type DbContactRelationship = "friend" | "seen_dm" | "seen_group" | "unknown";
 
-export type DbContactRecord = {
-  profile: string;
-  userId: string;
-  displayName?: string;
-  zaloName?: string;
-  avatar?: string;
-  accountStatus?: number;
-  relationship?: DbContactRelationship;
-  firstSeenAtMs?: number;
-  lastSeenAtMs?: number;
-  rawJson?: string;
-};
+export interface DbContactRecord {
+  profile: string
+  userId: string
+  displayName?: string
+  zaloName?: string
+  avatar?: string
+  accountStatus?: number
+  relationship?: DbContactRelationship
+  firstSeenAtMs?: number
+  lastSeenAtMs?: number
+  rawJson?: string
+}
 
 export type DbFriendRecord = DbContactRecord;
 
-export type DbMessageRecord = {
-  profile: string;
-  scopeThreadId: string;
-  rawThreadId: string;
-  threadType: DbThreadType;
-  peerId?: string;
-  title?: string;
-  msgId?: string;
-  cliMsgId?: string;
-  actionId?: string;
-  senderId?: string;
-  senderName?: string;
-  toId?: string;
-  timestampMs: number;
-  msgType?: string;
-  contentText?: string;
-  contentJson?: string;
-  quoteMsgId?: string;
-  quoteCliMsgId?: string;
-  quoteOwnerId?: string;
-  quoteText?: string;
-  media?: DbMedia[];
-  mentions?: DbMention[];
-  source: string;
-  rawMessageJson?: string;
-  rawPayloadJson?: string;
-};
+export interface DbMessageRecord {
+  profile: string
+  scopeThreadId: string
+  rawThreadId: string
+  threadType: DbThreadType
+  peerId?: string
+  title?: string
+  msgId?: string
+  cliMsgId?: string
+  actionId?: string
+  senderId?: string
+  senderName?: string
+  toId?: string
+  timestampMs: number
+  msgType?: string
+  contentText?: string
+  contentJson?: string
+  quoteMsgId?: string
+  quoteCliMsgId?: string
+  quoteOwnerId?: string
+  quoteText?: string
+  media?: DbMedia[]
+  mentions?: DbMention[]
+  source: string
+  rawMessageJson?: string
+  rawPayloadJson?: string
+}
 
-export type DbRecentMessageRow = {
-  msgId: string;
-  cliMsgId: string;
-  threadId: string;
-  threadType: DbThreadType;
-  senderId: string;
-  senderName: string;
-  ts: string;
-  msgType: string;
+export interface DbRecentMessageRow {
+  msgId: string
+  cliMsgId: string
+  threadId: string
+  threadType: DbThreadType
+  senderId: string
+  senderName: string
+  ts: string
+  msgType: string
   undo: {
-    msgId: string;
-    cliMsgId: string;
-    threadId: string;
-    group: boolean;
-  };
-  content: string;
-};
+    msgId: string
+    cliMsgId: string
+    threadId: string
+    group: boolean
+  }
+  content: string
+}
 
 export type DbMessageRow = DbRecentMessageRow & {
-  timestampMs: number;
-  rawThreadId?: string;
-  toId?: string;
-  quoteMsgId?: string;
-  quoteCliMsgId?: string;
-  quoteOwnerId?: string;
-  quoteText?: string;
-  source: string;
+  timestampMs: number
+  rawThreadId?: string
+  toId?: string
+  quoteMsgId?: string
+  quoteCliMsgId?: string
+  quoteOwnerId?: string
+  quoteText?: string
+  source: string
 };
 
-export type DbThreadRow = {
-  threadId: string;
-  rawThreadId: string;
-  threadType: DbThreadType;
-  title?: string;
-  peerId?: string;
-  messageCount: number;
-  firstMessageAtMs?: number;
-  lastMessageAtMs?: number;
-  memberCount: number;
-  isPinned: boolean;
-  isHidden: boolean;
-  isArchived: boolean;
-};
+export interface DbThreadRow {
+  threadId: string
+  rawThreadId: string
+  threadType: DbThreadType
+  title?: string
+  peerId?: string
+  messageCount: number
+  firstMessageAtMs?: number
+  lastMessageAtMs?: number
+  memberCount: number
+  isPinned: boolean
+  isHidden: boolean
+  isArchived: boolean
+}
 
-export type DbStatus = {
-  enabled: boolean;
-  path: string;
-  exists: boolean;
-  messageCount: number;
-  threadCount: number;
-  groupCount: number;
-  userCount: number;
-  lastMessageAtMs?: number;
-  updatedAt?: string;
-};
+export interface DbStatus {
+  enabled: boolean
+  path: string
+  exists: boolean
+  messageCount: number
+  threadCount: number
+  groupCount: number
+  userCount: number
+  lastMessageAtMs?: number
+  updatedAt?: string
+}
 
-export type DbContactRow = {
-  userId: string;
-  displayName?: string;
-  zaloName?: string;
-  avatar?: string;
-  accountStatus?: number;
-  relationship: DbContactRelationship;
-  firstSeenAtMs?: number;
-  lastSeenAtMs?: number;
-  title?: string;
-  chatId: string;
-  messageCount: number;
-  lastMessageAtMs?: number;
-};
+export interface DbContactRow {
+  userId: string
+  displayName?: string
+  zaloName?: string
+  avatar?: string
+  accountStatus?: number
+  relationship: DbContactRelationship
+  firstSeenAtMs?: number
+  lastSeenAtMs?: number
+  title?: string
+  chatId: string
+  messageCount: number
+  lastMessageAtMs?: number
+}
 
 export type DbFriendRow = DbContactRow;
 
-export type DbSelfProfileRow = {
-  userId: string;
-  displayName?: string;
-  info?: Record<string, unknown>;
-};
+export interface DbSelfProfileRow {
+  userId: string
+  displayName?: string
+  info?: Record<string, unknown>
+}
 
-export type DbSyncThreadStatus = {
-  scope: string;
-  scopeThreadId: string;
-  threadType: DbThreadType;
-  status: string;
-  cursor?: string;
-  completeness?: string;
-  lastSyncAt?: string;
-  error?: string;
-};
+export interface DbSyncThreadStatus {
+  scope: string
+  scopeThreadId: string
+  threadType: DbThreadType
+  status: string
+  cursor?: string
+  completeness?: string
+  lastSyncAt?: string
+  error?: string
+}
 
 const DB_CONFIG_FILE = "db.json";
 const DB_FILENAME = "messages.sqlite";
@@ -710,10 +707,10 @@ export async function closeDb(profile: string): Promise<void> {
 }
 
 export function resolveDmPeerId(params: {
-  threadId: string;
-  senderId?: string;
-  toId?: string;
-  selfId?: string;
+  threadId: string
+  senderId?: string
+  toId?: string
+  selfId?: string
 }): string {
   const threadId = normalizeId(params.threadId);
   const senderId = normalizeId(params.senderId);
@@ -754,11 +751,11 @@ export function resolveDmPeerId(params: {
 }
 
 export function resolveScopeThreadId(params: {
-  threadType: DbThreadType;
-  rawThreadId: string;
-  senderId?: string;
-  toId?: string;
-  selfId?: string;
+  threadType: DbThreadType
+  rawThreadId: string
+  senderId?: string
+  toId?: string
+  selfId?: string
 }): string {
   if (params.threadType === "group") {
     return normalizeId(params.rawThreadId);
@@ -855,10 +852,10 @@ export async function replaceThreadMembers(
   const now = nowIso();
   const commands: DbStatement[] = [
     {
-      sql: `DELETE FROM thread_members WHERE profile = ? AND scope_thread_id = ?`,
+      sql: "DELETE FROM thread_members WHERE profile = ? AND scope_thread_id = ?",
       params: [profile, scopeThreadId],
     },
-    ...members.map((member) => ({
+    ...members.map(member => ({
       sql: INSERT_THREAD_MEMBER_SQL,
       params: [
         member.profile,
@@ -906,10 +903,10 @@ export async function persistFriend(record: DbFriendRecord): Promise<void> {
 }
 
 export async function persistSelfProfile(params: {
-  profile: string;
-  userId: string;
-  displayName?: string;
-  infoJson?: string;
+  profile: string
+  userId: string
+  displayName?: string
+  infoJson?: string
 }): Promise<void> {
   const db = await getDb(params.profile);
   const now = nowIso();
@@ -987,11 +984,11 @@ export async function persistMessage(record: DbMessageRecord): Promise<void> {
       ],
     },
     {
-      sql: `DELETE FROM message_media WHERE profile = ? AND message_uid = ?`,
+      sql: "DELETE FROM message_media WHERE profile = ? AND message_uid = ?",
       params: [record.profile, messageUid],
     },
     {
-      sql: `DELETE FROM message_mentions WHERE profile = ? AND message_uid = ?`,
+      sql: "DELETE FROM message_mentions WHERE profile = ? AND message_uid = ?",
       params: [record.profile, messageUid],
     },
     ...(record.media ?? []).map((media, index) => ({
@@ -1029,13 +1026,13 @@ export async function persistMessage(record: DbMessageRecord): Promise<void> {
 }
 
 export async function setSyncState(params: {
-  profile: string;
-  scopeThreadId: string;
-  threadType: DbThreadType;
-  status: string;
-  completeness?: string;
-  cursor?: string;
-  error?: string;
+  profile: string
+  scopeThreadId: string
+  threadType: DbThreadType
+  status: string
+  completeness?: string
+  cursor?: string
+  error?: string
 }): Promise<void> {
   const db = await getDb(params.profile);
   const now = nowIso();
@@ -1070,24 +1067,24 @@ export async function setSyncState(params: {
   );
 }
 
-type RecentRow = {
-  msg_id: string | null;
-  cli_msg_id: string | null;
-  scope_thread_id: string;
-  thread_type: DbThreadType;
-  sender_id: string | null;
-  sender_name: string | null;
-  timestamp_ms: number;
-  msg_type: string | null;
-  content_text: string | null;
-  content_json: string | null;
-};
+interface RecentRow {
+  msg_id: string | null
+  cli_msg_id: string | null
+  scope_thread_id: string
+  thread_type: DbThreadType
+  sender_id: string | null
+  sender_name: string | null
+  timestamp_ms: number
+  msg_type: string | null
+  content_text: string | null
+  content_json: string | null
+}
 
 export async function listRecentMessages(params: {
-  profile: string;
-  threadId: string;
-  threadType: DbThreadType;
-  count: number;
+  profile: string
+  threadId: string
+  threadType: DbThreadType
+  count: number
 }): Promise<DbRecentMessageRow[]> {
   const db = await getDb(params.profile);
   const rows = await db.all<RecentRow[]>(
@@ -1111,7 +1108,7 @@ export async function listRecentMessages(params: {
     [params.profile, params.threadId, params.threadType, params.count],
   );
 
-  return rows.map((row) => ({
+  return rows.map(row => ({
     msgId: row.msg_id ?? "",
     cliMsgId: row.cli_msg_id ?? "",
     threadId: row.scope_thread_id,
@@ -1130,33 +1127,33 @@ export async function listRecentMessages(params: {
   }));
 }
 
-type MessageListRow = {
-  raw_thread_id: string;
-  thread_type: DbThreadType;
-  msg_id: string | null;
-  cli_msg_id: string | null;
-  sender_id: string | null;
-  sender_name: string | null;
-  to_id: string | null;
-  timestamp_ms: number;
-  msg_type: string | null;
-  content_text: string | null;
-  content_json: string | null;
-  quote_msg_id: string | null;
-  quote_cli_msg_id: string | null;
-  quote_owner_id: string | null;
-  quote_text: string | null;
-  source: string;
-};
+interface MessageListRow {
+  raw_thread_id: string
+  thread_type: DbThreadType
+  msg_id: string | null
+  cli_msg_id: string | null
+  sender_id: string | null
+  sender_name: string | null
+  to_id: string | null
+  timestamp_ms: number
+  msg_type: string | null
+  content_text: string | null
+  content_json: string | null
+  quote_msg_id: string | null
+  quote_cli_msg_id: string | null
+  quote_owner_id: string | null
+  quote_text: string | null
+  source: string
+}
 
 export async function listMessages(params: {
-  profile: string;
-  threadId: string;
-  threadType: DbThreadType;
-  sinceMs?: number;
-  untilMs?: number;
-  limit?: number;
-  newestFirst?: boolean;
+  profile: string
+  threadId: string
+  threadType: DbThreadType
+  sinceMs?: number
+  untilMs?: number
+  limit?: number
+  newestFirst?: boolean
 }): Promise<DbMessageRow[]> {
   const db = await getDb(params.profile);
   const order = params.newestFirst ? "DESC" : "ASC";
@@ -1224,7 +1221,7 @@ export async function listMessages(params: {
         ],
   );
 
-  return rows.map((row) => ({
+  return rows.map(row => ({
     msgId: row.msg_id ?? "",
     cliMsgId: row.cli_msg_id ?? "",
     threadId: params.threadId,
@@ -1252,23 +1249,23 @@ export async function listMessages(params: {
 }
 
 type MessageByIdRow = RecentRow & {
-  raw_thread_id: string;
-  msg_id: string | null;
-  cli_msg_id: string | null;
-  action_id: string | null;
-  to_id: string | null;
-  quote_msg_id: string | null;
-  quote_cli_msg_id: string | null;
-  quote_owner_id: string | null;
-  quote_text: string | null;
-  source: string;
-  raw_message_json: string | null;
-  raw_payload_json: string | null;
+  raw_thread_id: string
+  msg_id: string | null
+  cli_msg_id: string | null
+  action_id: string | null
+  to_id: string | null
+  quote_msg_id: string | null
+  quote_cli_msg_id: string | null
+  quote_owner_id: string | null
+  quote_text: string | null
+  source: string
+  raw_message_json: string | null
+  raw_payload_json: string | null
 };
 
 export async function getMessageById(params: {
-  profile: string;
-  id: string;
+  profile: string
+  id: string
 }): Promise<Record<string, unknown> | null> {
   const db = await getDb(params.profile);
   const row = await db.get<MessageByIdRow>(
@@ -1313,24 +1310,24 @@ export async function getMessageById(params: {
   };
 }
 
-type ThreadAggRow = {
-  scope_thread_id: string;
-  raw_thread_id: string;
-  thread_type: DbThreadType;
-  title: string | null;
-  peer_id: string | null;
-  is_pinned: number;
-  is_hidden: number;
-  is_archived: number;
-  message_count: number;
-  first_message_at_ms: number | null;
-  last_message_at_ms: number | null;
-  member_count: number;
-};
+interface ThreadAggRow {
+  scope_thread_id: string
+  raw_thread_id: string
+  thread_type: DbThreadType
+  title: string | null
+  peer_id: string | null
+  is_pinned: number
+  is_hidden: number
+  is_archived: number
+  message_count: number
+  first_message_at_ms: number | null
+  last_message_at_ms: number | null
+  member_count: number
+}
 
 export async function listThreads(params: {
-  profile: string;
-  threadType?: DbThreadType;
+  profile: string
+  threadType?: DbThreadType
 }): Promise<DbThreadRow[]> {
   const db = await getDb(params.profile);
   const rows = await db.all<ThreadAggRow[]>(
@@ -1365,7 +1362,7 @@ export async function listThreads(params: {
     [params.profile, params.threadType ?? null, params.threadType ?? null],
   );
 
-  return rows.map((row) => ({
+  return rows.map(row => ({
     threadId: row.scope_thread_id,
     rawThreadId: row.raw_thread_id,
     threadType: row.thread_type,
@@ -1386,13 +1383,13 @@ export async function listGroups(profile: string): Promise<DbThreadRow[]> {
 }
 
 type ThreadInfoRow = ThreadAggRow & {
-  raw_json: string | null;
+  raw_json: string | null
 };
 
 export async function getThreadInfo(params: {
-  profile: string;
-  threadId: string;
-  threadType?: DbThreadType;
+  profile: string
+  threadId: string
+  threadType?: DbThreadType
 }): Promise<Record<string, unknown> | null> {
   const db = await getDb(params.profile);
   const row = await db.get<ThreadInfoRow>(
@@ -1458,20 +1455,20 @@ export async function getThreadInfo(params: {
   };
 }
 
-type ContactAggRow = {
-  user_id: string;
-  display_name: string | null;
-  zalo_name: string | null;
-  avatar: string | null;
-  account_status: number | null;
-  relationship: DbContactRelationship;
-  first_seen_at_ms: number | null;
-  last_seen_at_ms: number | null;
-  chat_id: string | null;
-  title: string | null;
-  message_count: number;
-  last_message_at_ms: number | null;
-};
+interface ContactAggRow {
+  user_id: string
+  display_name: string | null
+  zalo_name: string | null
+  avatar: string | null
+  account_status: number | null
+  relationship: DbContactRelationship
+  first_seen_at_ms: number | null
+  last_seen_at_ms: number | null
+  chat_id: string | null
+  title: string | null
+  message_count: number
+  last_message_at_ms: number | null
+}
 
 const CONTACT_CHAT_CTE = `
   WITH ranked_contact_threads AS (
@@ -1515,8 +1512,8 @@ const CONTACT_CHAT_CTE = `
 `;
 
 export async function listContacts(params: {
-  profile: string;
-  relationship?: DbContactRelationship;
+  profile: string
+  relationship?: DbContactRelationship
 }): Promise<DbContactRow[]> {
   const db = await getDb(params.profile);
   const rows = await db.all<ContactAggRow[]>(
@@ -1546,7 +1543,7 @@ export async function listContacts(params: {
     `,
     [params.profile, params.relationship ?? null, params.relationship ?? null],
   );
-  return rows.map((row) => ({
+  return rows.map(row => ({
     userId: row.user_id,
     displayName: row.display_name ?? undefined,
     zaloName: row.zalo_name ?? undefined,
@@ -1567,13 +1564,13 @@ export async function listFriends(profile: string): Promise<DbFriendRow[]> {
 }
 
 type ContactInfoRow = ContactAggRow & {
-  raw_json: string | null;
+  raw_json: string | null
 };
 
 export async function getContactInfo(params: {
-  profile: string;
-  userId: string;
-  relationship?: DbContactRelationship;
+  profile: string
+  userId: string
+  relationship?: DbContactRelationship
 }): Promise<Record<string, unknown> | null> {
   const db = await getDb(params.profile);
   const row = await db.get<ContactInfoRow>(
@@ -1631,8 +1628,8 @@ export async function getContactInfo(params: {
 }
 
 export async function getFriendInfo(params: {
-  profile: string;
-  userId: string;
+  profile: string
+  userId: string
 }): Promise<Record<string, unknown> | null> {
   return await getContactInfo({
     profile: params.profile,
@@ -1642,9 +1639,9 @@ export async function getFriendInfo(params: {
 }
 
 export async function findContacts(params: {
-  profile: string;
-  query: string;
-  relationship?: DbContactRelationship;
+  profile: string
+  query: string
+  relationship?: DbContactRelationship
 }): Promise<DbContactRow[]> {
   const query = normalizeSearchText(params.query);
   if (!query) {
@@ -1661,13 +1658,13 @@ export async function findContacts(params: {
       row.zaloName ?? "",
       row.title ?? "",
     ];
-    return haystacks.some((value) => matchesSearchPattern(value, query));
+    return haystacks.some(value => matchesSearchPattern(value, query));
   });
 }
 
 export async function findFriends(params: {
-  profile: string;
-  query: string;
+  profile: string
+  query: string
 }): Promise<DbFriendRow[]> {
   return await findContacts({
     profile: params.profile,
@@ -1677,13 +1674,13 @@ export async function findFriends(params: {
 }
 
 export async function reconcileFriendRelationships(params: {
-  profile: string;
-  currentFriendIds: string[];
+  profile: string
+  currentFriendIds: string[]
 }): Promise<void> {
   const db = await getDb(params.profile);
   const now = nowIso();
   const friendIds = Array.from(
-    new Set(params.currentFriendIds.map((value) => normalizeId(value)).filter(Boolean)),
+    new Set(params.currentFriendIds.map(value => normalizeId(value)).filter(Boolean)),
   );
   const stalePredicate = friendIds.length > 0
     ? `AND contacts.user_id NOT IN (${friendIds.map(() => "?").join(", ")})`
@@ -1726,11 +1723,11 @@ export async function listChats(profile: string): Promise<DbThreadRow[]> {
   return listThreads({ profile });
 }
 
-type SelfProfileDbRow = {
-  user_id: string;
-  display_name: string | null;
-  info_json: string | null;
-};
+interface SelfProfileDbRow {
+  user_id: string
+  display_name: string | null
+  info_json: string | null
+}
 
 export async function getSelfProfile(profile: string): Promise<DbSelfProfileRow | null> {
   const db = await getDb(profile);
@@ -1753,19 +1750,19 @@ export async function getSelfProfile(profile: string): Promise<DbSelfProfileRow 
   };
 }
 
-type MemberRow = {
-  user_id: string;
-  display_name: string | null;
-  zalo_name: string | null;
-  avatar: string | null;
-  account_status: number | null;
-  member_type: number | null;
-  snapshot_at_ms: number;
-};
+interface MemberRow {
+  user_id: string
+  display_name: string | null
+  zalo_name: string | null
+  avatar: string | null
+  account_status: number | null
+  member_type: number | null
+  snapshot_at_ms: number
+}
 
 export async function listThreadMembers(params: {
-  profile: string;
-  threadId: string;
+  profile: string
+  threadId: string
 }): Promise<Record<string, unknown>[]> {
   const db = await getDb(params.profile);
   const rows = await db.all<MemberRow[]>(
@@ -1778,7 +1775,7 @@ export async function listThreadMembers(params: {
     `,
     [params.profile, params.threadId],
   );
-  return rows.map((row) => ({
+  return rows.map(row => ({
     userId: row.user_id,
     displayName: row.display_name ?? undefined,
     zaloName: row.zalo_name ?? undefined,
@@ -1789,14 +1786,14 @@ export async function listThreadMembers(params: {
   }));
 }
 
-type StatusRow = {
-  message_count: number;
-  thread_count: number;
-  group_count: number;
-  user_count: number;
-  last_message_at_ms: number | null;
-  last_updated_at: string | null;
-};
+interface StatusRow {
+  message_count: number
+  thread_count: number
+  group_count: number
+  user_count: number
+  last_message_at_ms: number | null
+  last_updated_at: string | null
+}
 
 export async function getDbStatus(profile: string): Promise<DbStatus> {
   const filename = await resolveDbPath(profile);
@@ -1850,20 +1847,20 @@ export async function getDbStatus(profile: string): Promise<DbStatus> {
   };
 }
 
-type SyncRow = {
-  scope: string;
-  scope_thread_id: string;
-  thread_type: DbThreadType;
-  status: string;
-  cursor: string | null;
-  completeness: string | null;
-  last_sync_at: string | null;
-  error: string | null;
-};
+interface SyncRow {
+  scope: string
+  scope_thread_id: string
+  thread_type: DbThreadType
+  status: string
+  cursor: string | null
+  completeness: string | null
+  last_sync_at: string | null
+  error: string | null
+}
 
 export async function listSyncState(params: {
-  profile: string;
-  threadType?: DbThreadType;
+  profile: string
+  threadType?: DbThreadType
 }): Promise<DbSyncThreadStatus[]> {
   const filename = await resolveDbPath(params.profile);
   const exists = await fs
@@ -1884,7 +1881,7 @@ export async function listSyncState(params: {
     `,
     [params.profile, params.threadType ?? null, params.threadType ?? null],
   );
-  return rows.map((row) => ({
+  return rows.map(row => ({
     scope: row.scope,
     scopeThreadId: row.scope_thread_id,
     threadType: row.thread_type,
@@ -1897,30 +1894,30 @@ export async function listSyncState(params: {
 }
 
 export function normalizeInboundListenRecord(params: {
-  profile: string;
-  threadType: DbThreadType;
-  rawThreadId: string;
-  senderId?: string;
-  senderName?: string;
-  toId?: string;
-  selfId?: string;
-  title?: string;
-  msgId?: string;
-  cliMsgId?: string;
-  actionId?: string;
-  timestampMs: number;
-  msgType?: string;
-  contentText?: string;
-  contentJson?: string;
-  quoteMsgId?: string;
-  quoteCliMsgId?: string;
-  quoteOwnerId?: string;
-  quoteText?: string;
-  media?: DbMedia[];
-  mentions?: DbMention[];
-  rawMessage?: unknown;
-  rawPayload?: unknown;
-  source: string;
+  profile: string
+  threadType: DbThreadType
+  rawThreadId: string
+  senderId?: string
+  senderName?: string
+  toId?: string
+  selfId?: string
+  title?: string
+  msgId?: string
+  cliMsgId?: string
+  actionId?: string
+  timestampMs: number
+  msgType?: string
+  contentText?: string
+  contentJson?: string
+  quoteMsgId?: string
+  quoteCliMsgId?: string
+  quoteOwnerId?: string
+  quoteText?: string
+  media?: DbMedia[]
+  mentions?: DbMention[]
+  rawMessage?: unknown
+  rawPayload?: unknown
+  source: string
 }): DbMessageRecord {
   const scopeThreadId = resolveScopeThreadId({
     threadType: params.threadType,
@@ -1959,9 +1956,9 @@ export function normalizeInboundListenRecord(params: {
 }
 
 export function normalizeThreadFlags(record: Record<string, unknown>): {
-  isPinned?: boolean;
-  isHidden?: boolean;
-  isArchived?: boolean;
+  isPinned?: boolean
+  isHidden?: boolean
+  isArchived?: boolean
 } {
   return {
     isPinned: normalizeOptionalBool(record.isPinned) ?? normalizeOptionalInt(record.isPinned) === 1,

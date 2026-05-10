@@ -1,28 +1,17 @@
 {
   "name": "openzca",
-  "version": "0.1.59",
-  "description": "Open-source zca-compatible CLI to integrate Zalo with OpenClaw",
   "type": "module",
-  "bin": {
-    "openzca": "dist/cli.js",
-    "zca": "dist/cli.js"
+  "version": "0.1.60",
+  "description": "Open-source zca-compatible CLI to integrate Zalo with OpenClaw",
+  "author": "Tom",
+  "license": "MIT",
+  "homepage": "https://github.com/darkamenosa/openzca#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darkamenosa/openzca.git"
   },
-  "main": "dist/cli.js",
-  "files": [
-    "dist",
-    "LICENSE",
-    "README.md"
-  ],
-  "scripts": {
-    "build": "npm run build:cli && npm run build:worker",
-    "build:cli": "tsup src/cli.ts --format esm --target node22 --out-dir dist --clean",
-    "build:worker": "tsup src/lib/db-worker.ts src/lib/db-migrations.ts --format esm --target node22 --out-dir dist && node scripts/copy-db-migrations.mjs",
-    "dev": "tsx src/cli.ts",
-    "test": "tsx --test tests/*.test.ts",
-    "typecheck": "tsc -p tsconfig.json",
-    "lint": "tsc -p tsconfig.json --noEmit",
-    "prepare": "npm run build",
-    "prepublishOnly": "npm run build"
+  "bugs": {
+    "url": "https://github.com/darkamenosa/openzca/issues"
   },
   "keywords": [
     "zalo",
@@ -31,18 +20,28 @@
     "openclaw",
     "automation"
   ],
-  "author": "Tom",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/darkamenosa/openzca.git"
+  "main": "dist/cli.js",
+  "bin": {
+    "openzca": "dist/cli.js",
+    "zca": "dist/cli.js"
   },
-  "homepage": "https://github.com/darkamenosa/openzca#readme",
-  "bugs": {
-    "url": "https://github.com/darkamenosa/openzca/issues"
-  },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "dist"
+  ],
   "engines": {
     "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "npm run build:cli && npm run build:worker",
+    "build:cli": "tsup src/cli.ts --format esm --target node22 --out-dir dist --clean",
+    "build:worker": "tsup src/lib/db-worker.ts src/lib/db-migrations.ts --format esm --target node22 --out-dir dist && node scripts/copy-db-migrations.mjs",
+    "dev": "tsx src/cli.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "@types/qrcode-terminal": "^0.12.2",
@@ -52,7 +51,10 @@
     "zca-js": "^2.1.2"
   },
   "devDependencies": {
+    "@antfu/eslint-config": "^8.2.0",
     "@types/node": "^25.2.3",
+    "eslint": "^10.3.0",
+    "jsonc-eslint-parser": "^3.1.0",
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"

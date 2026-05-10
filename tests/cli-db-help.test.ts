@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -183,13 +183,13 @@ test("db contact subcommands honor -j JSON output", { concurrency: false }, asyn
 
   const listResult = runCli(["--profile", profile, "db", "contact", "list", "-j"], env);
   assert.equal(listResult.status, 0, listResult.stderr);
-  const listPayload = JSON.parse(listResult.stdout) as Array<{ userId: string; relationship: string }>;
+  const listPayload = JSON.parse(listResult.stdout) as Array<{ userId: string, relationship: string }>;
   assert.equal(listPayload[0]?.userId, "u1");
   assert.equal(listPayload[0]?.relationship, "seen_dm");
 
   const infoResult = runCli(["--profile", profile, "db", "contact", "info", "u1", "-j"], env);
   assert.equal(infoResult.status, 0, infoResult.stderr);
-  const infoPayload = JSON.parse(infoResult.stdout) as { userId: string; chatId: string };
+  const infoPayload = JSON.parse(infoResult.stdout) as { userId: string, chatId: string };
   assert.equal(infoPayload.userId, "u1");
   assert.equal(infoPayload.chatId, "u1");
 });
@@ -262,10 +262,10 @@ test("db contact messages resolves the canonical chat id for legacy DM threads",
   const result = runCli(["--profile", profile, "db", "contact", "messages", "u1", "-j"], env);
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout) as {
-    userId: string;
-    chatId: string;
-    count: number;
-    messages: Array<{ msgId: string }>;
+    userId: string
+    chatId: string
+    count: number
+    messages: Array<{ msgId: string }>
   };
   assert.equal(payload.userId, "u1");
   assert.equal(payload.chatId, "legacy-u1");
@@ -285,6 +285,7 @@ test("built dist CLI can enable DB and read DB status", { concurrency: false }, 
   const buildResult = spawnSync("npm", ["run", "build"], {
     cwd: repoRoot,
     encoding: "utf8",
+    shell: true,
     env: {
       ...process.env,
       ...env,
@@ -300,7 +301,7 @@ test("built dist CLI can enable DB and read DB status", { concurrency: false }, 
 
   const statusResult = runDistCli(["--profile", profile, "db", "status", "-j"], env);
   assert.equal(statusResult.status, 0, statusResult.stderr);
-  const payload = JSON.parse(statusResult.stdout) as { enabled: boolean; exists: boolean };
+  const payload = JSON.parse(statusResult.stdout) as { enabled: boolean, exists: boolean };
   assert.equal(payload.enabled, true);
   assert.equal(payload.exists, true);
 });
@@ -542,9 +543,9 @@ test("db chat subcommands honor -j JSON output", { concurrency: false }, async (
   );
   assert.equal(messagesResult.status, 0, messagesResult.stderr);
   const messagesPayload = JSON.parse(messagesResult.stdout) as {
-    chatId: string;
-    count: number;
-    messages: Array<{ msgId: string }>;
+    chatId: string
+    count: number
+    messages: Array<{ msgId: string }>
   };
   assert.equal(messagesPayload.chatId, "u1");
   assert.equal(messagesPayload.count, 1);
@@ -607,9 +608,9 @@ test("db chat <id> aliases to db chat messages <id>", { concurrency: false }, as
   const aliasResult = runCli(["--profile", profile, "db", "chat", "u1", "-j"], env);
   assert.equal(aliasResult.status, 0, aliasResult.stderr);
   const aliasPayload = JSON.parse(aliasResult.stdout) as {
-    chatId: string;
-    count: number;
-    messages: Array<{ msgId: string }>;
+    chatId: string
+    count: number
+    messages: Array<{ msgId: string }>
   };
   assert.equal(aliasPayload.chatId, "u1");
   assert.equal(aliasPayload.count, 1);

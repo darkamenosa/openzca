@@ -1,4 +1,4 @@
-const DURATION_PART_RE = /(\d+)\s*(ms|s|m|h|d|w)/gi;
+const DURATION_PART_RE = /(\d+)\s*(ms|[smhdw])/gi;
 
 function durationToMs(input: string): number | null {
   const text = input.trim().toLowerCase();
@@ -49,7 +49,7 @@ function durationToMs(input: string): number | null {
 
   const normalized = text.replace(/\s+/g, "");
   const consumed = Array.from(normalized.matchAll(DURATION_PART_RE))
-    .map((match) => match[0])
+    .map(match => match[0])
     .join("");
   if (consumed !== normalized) {
     return null;

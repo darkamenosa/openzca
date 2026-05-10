@@ -1,19 +1,20 @@
-import { ThreadType, type SendMessageQuote } from "zca-js";
+import type { SendMessageQuote } from "zca-js";
+import { ThreadType } from "zca-js";
 
 type ReplyMessageRecord = Record<string, unknown>;
 
 type ReplyMessageContent = string | Record<string, unknown>;
 
-export type PreparedReplyMessage = {
-  quote: SendMessageQuote;
-  inferredThreadId?: string;
-};
+export interface PreparedReplyMessage {
+  quote: SendMessageQuote
+  inferredThreadId?: string
+}
 
 export function prepareReplyMessage(
   value: unknown,
   params?: {
-    threadType?: ThreadType;
-    selfId?: string;
+    threadType?: ThreadType
+    selfId?: string
   },
 ): PreparedReplyMessage {
   const sourceRecord = asReplyMessageRecord(value);
@@ -80,14 +81,14 @@ export function prepareReplyMessage(
 export function prepareStoredReplyMessage(
   value: unknown,
   params: {
-    threadId: string;
-    threadType: ThreadType;
-    selfId?: string;
+    threadId: string
+    threadType: ThreadType
+    selfId?: string
   },
 ): SendMessageQuote {
   const record = asReplyMessageRecord(value);
-  const storedThreadType =
-    record.threadType === "group"
+  const storedThreadType
+    = record.threadType === "group"
       ? ThreadType.Group
       : record.threadType === "user"
         ? ThreadType.User
@@ -96,8 +97,8 @@ export function prepareStoredReplyMessage(
     throw new Error("Reply source thread type does not match --group.");
   }
 
-  const storedThreadId =
-    firstString([record.threadId, record.rawThreadId]) ?? undefined;
+  const storedThreadId
+    = firstString([record.threadId, record.rawThreadId]) ?? undefined;
   if (storedThreadId && storedThreadId !== params.threadId) {
     throw new Error("Reply source belongs to a different thread.");
   }
@@ -149,8 +150,8 @@ function stripEnrichedReplyDecorations(value: string): string {
   while (lines.length > 0) {
     const last = lines[lines.length - 1].trim();
     if (
-      last.startsWith("[reply context: ") ||
-      last.startsWith("[reply media attached:")
+      last.startsWith("[reply context: ")
+      || last.startsWith("[reply media attached:")
       || last.startsWith("[reply media attached ")
     ) {
       lines.pop();
@@ -177,14 +178,14 @@ function parseReplyMessageTtl(value: unknown): number {
   if (value === undefined || value === null || value === "") {
     return 0;
   }
-  const parsed =
-    typeof value === "number"
+  const parsed
+    = typeof value === "number"
       ? value
       : typeof value === "string"
         ? Number(value)
         : Number.NaN;
   if (!Number.isFinite(parsed)) {
-    throw new Error("Reply message ttl must be a finite number.");
+    throw new TypeError("Reply message ttl must be a finite number.");
   }
   return Math.trunc(parsed);
 }
@@ -230,19 +231,19 @@ function maybeTimestampSecondsToMsString(value: unknown): string | undefined {
 
 function isLikelyOpenzcaListenPayload(record: ReplyMessageRecord): boolean {
   return (
-    typeof record.threadId === "string" &&
-    (typeof record.senderId === "string" ||
-      typeof record.chatType === "string" ||
-      typeof record.metadata === "object")
+    typeof record.threadId === "string"
+    && (typeof record.senderId === "string"
+      || typeof record.chatType === "string"
+      || typeof record.metadata === "object")
   );
 }
 
 function inferReplyMessageThreadId(params: {
-  sourceRecord: ReplyMessageRecord;
-  canonicalRecord: ReplyMessageRecord;
-  metadata?: ReplyMessageRecord;
-  threadType?: ThreadType;
-  selfId?: string;
+  sourceRecord: ReplyMessageRecord
+  canonicalRecord: ReplyMessageRecord
+  metadata?: ReplyMessageRecord
+  threadType?: ThreadType
+  selfId?: string
 }): string | undefined {
   const directThreadId = firstString([
     params.sourceRecord.threadId,

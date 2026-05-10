@@ -1,37 +1,37 @@
+import type { API, ThreadType } from "zca-js";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
+
 import path from "node:path";
 import { promisify } from "node:util";
-
-import { ThreadType, type API } from "zca-js";
 import { getSendRetryConfigFromEnv, retryable } from "./send-retry.js";
 
 const execFileAsync = promisify(execFile);
 
-export type VideoSendModePlan =
+export type VideoSendModePlan
+  = | {
+    mode: "native"
+  }
   | {
-      mode: "native";
-    }
-  | {
-      mode: "attachment";
-      reason: string;
-    };
+    mode: "attachment"
+    reason: string
+  };
 
-export type VideoProbeMetadata = {
-  durationMs?: number;
-  width?: number;
-  height?: number;
-};
+export interface VideoProbeMetadata {
+  durationMs?: number
+  width?: number
+  height?: number
+}
 
-type GeneratedThumbnail = {
-  path: string;
-  cleanup: () => Promise<void>;
-};
+interface GeneratedThumbnail {
+  path: string
+  cleanup: () => Promise<void>
+}
 
 export function planVideoSendMode(params: {
-  files: string[];
-  ffmpegAvailable: boolean;
+  files: string[]
+  ffmpegAvailable: boolean
 }): VideoSendModePlan {
   const { files, ffmpegAvailable } = params;
 
@@ -62,11 +62,11 @@ export function planVideoSendMode(params: {
 
 export function parseVideoProbeOutput(raw: string): VideoProbeMetadata {
   const parsed = JSON.parse(raw) as {
-    streams?: Array<Record<string, unknown>>;
-    format?: Record<string, unknown>;
+    streams?: Array<Record<string, unknown>>
+    format?: Record<string, unknown>
   };
 
-  const videoStream = parsed.streams?.find((stream) => stream.codec_type === "video");
+  const videoStream = parsed.streams?.find(stream => stream.codec_type === "video");
   const width = toPositiveInteger(videoStream?.width);
   const height = toPositiveInteger(videoStream?.height);
   const durationSeconds = toPositiveNumber(videoStream?.duration) ?? toPositiveNumber(parsed.format?.duration);
@@ -205,12 +205,12 @@ function pickUploadedThumbnailUrl(
 }
 
 export async function sendNativeVideo(params: {
-  api: API;
-  threadId: string;
-  threadType: ThreadType;
-  videoPath: string;
-  message?: string;
-  thumbnailPath?: string;
+  api: API
+  threadId: string
+  threadType: ThreadType
+  videoPath: string
+  message?: string
+  thumbnailPath?: string
 }): Promise<unknown> {
   const metadata = await maybeProbeVideoFile(params.videoPath);
   const generatedThumbnail = params.thumbnailPath ? null : await generateVideoThumbnail(params.videoPath);
