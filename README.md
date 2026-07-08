@@ -308,6 +308,7 @@ Notes:
 
 `listen --raw` includes inbound media metadata when available:
 
+- `contentKind` (`text`, `contact`, `link`, `location`, `media`, `file`, `poll`, `event`, or `unknown`)
 - `mediaPath`, `mediaPaths`
 - `mediaUrl`, `mediaUrls`
 - `mediaType`, `mediaTypes`
@@ -322,6 +323,7 @@ It also includes stable routing fields for downstream tools:
 - `pollId`, `pollTitle`, `pollOptionIds`, and `poll` when a message or group event carries poll metadata
 - `rawMessage` for poll message payloads, and `rawGroupEvent` for poll group-event payloads
 - `metadata.threadId`, `metadata.targetId`, `metadata.senderId`, `metadata.toId`
+- `metadata.contentKind`
 - `metadata.mentions`, `metadata.mentionIds`, `metadata.mentionCount`
 - `metadata.pollId`, `metadata.pollTitle`, `metadata.pollOptionIds`, and `metadata.poll`
 - `metadata.rawMessage` / `metadata.rawGroupEvent` for poll payload schema debugging
@@ -343,6 +345,15 @@ When a reply/quoted message is detected, `content` also appends a compact line:
 This helps downstream consumers that only read `content` (without parsing `quote`) still see reply context.
 
 `listen` also normalizes JSON-string message payloads (common for `chat.voice` and `share.file`) so media URLs are extracted/cached instead of being forwarded as raw JSON text.
+
+Structured non-media messages can contain URLs without being downloaded as attachments. Contact-card style payloads are emitted as text such as:
+
+```text
+Contact card: Nai HDV
+Phone: 0378146753
+```
+
+and carry `contentKind: "contact"` with no `mediaKind`.
 
 For non-text inbound messages (image/video/audio/file), `content` is emitted as a media note:
 
