@@ -99,6 +99,13 @@ import {
   parsePollId,
   parsePollOptionIds,
 } from "./lib/group-poll.js";
+import {
+  classifyInboundContent,
+  collectHttpUrls,
+  normalizeStructuredContent,
+  summarizeStructuredContent,
+  type InboundMediaKind,
+} from "./lib/listen-content.js";
 import { extractInboundPollInfo } from "./lib/listen-poll.js";
 import { parseDurationInput, parseTimeBoundaryInput } from "./lib/time-range.js";
 import {
@@ -3618,224 +3625,6 @@ function getStringCandidate(record: Record<string, unknown>, keys: string[]): st
   return "";
 }
 
-type InboundMediaKind = "image" | "video" | "audio" | "file";
-
-function normalizeMessageType(value: unknown): string {
-  if (typeof value !== "string") return "";
-  return value.trim().toLowerCase();
-}
-
-function looksLikeStructuredJsonString(value: string): boolean {
-  const trimmed = value.trim();
-  if (trimmed.length < 2) return false;
-  const first = trimmed[0];
-  const last = trimmed[trimmed.length - 1];
-  if (first === "{" && last === "}") return true;
-  if (first === "[" && last === "]") return true;
-  return false;
-}
-
-function normalizeStructuredContent(value: unknown, depth = 0): unknown {
-  if (depth > 5 || value === null || value === undefined) {
-    return value;
-  }
-
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!looksLikeStructuredJsonString(trimmed)) {
-      return value;
-    }
-    try {
-      const parsed = JSON.parse(trimmed);
-      return normalizeStructuredContent(parsed, depth + 1);
-    } catch {
-      return value;
-    }
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((entry) => normalizeStructuredContent(entry, depth + 1));
-  }
-
-  const record = asObject(value);
-  if (!record) {
-    return value;
-  }
-
-  const normalized: Record<string, unknown> = {};
-  for (const [key, nested] of Object.entries(record)) {
-    normalized[key] = normalizeStructuredContent(nested, depth + 1);
-  }
-  return normalized;
-}
-
-function detectInboundMediaKind(msgType: unknown, content: unknown): InboundMediaKind | null {
-  const normalizedType = normalizeMessageType(msgType);
-
-  if (
-    normalizedType.includes("photo") ||
-    normalizedType.includes("gif") ||
-    normalizedType.includes("sticker")
-  ) {
-    return "image";
-  }
-  if (normalizedType.includes("video")) return "video";
-  if (normalizedType.includes("voice") || normalizedType.includes("audio")) return "audio";
-  if (normalizedType.includes("share.file")) return "file";
-  if (normalizedType.includes("link") || normalizedType.includes("location")) return null;
-
-  const record = asObject(content);
-  if (!record) return null;
-
-  if (getStringCandidate(record, ["voiceUrl", "m4aUrl", "audioUrl", "voice_url", "m4a_url", "audio_url"])) {
-    return "audio";
-  }
-  if (getStringCandidate(record, ["videoUrl"])) return "video";
-  if (
-    getStringCandidate(record, [
-      "hdUrl",
-      "normalUrl",
-      "thumbUrl",
-      "thumb",
-      "rawUrl",
-      "oriUrl",
-      "imageUrl",
-    ])
-  ) {
-    return "image";
-  }
-  if (getStringCandidate(record, ["fileUrl", "fileName", "fileId", "href", "url"])) return "file";
-
-  return null;
-}
-
-function collectHttpUrls(value: unknown, sink: Set<string>, depth = 0): void {
-  if (depth > 5 || sink.size >= 16) return;
-
-  if (typeof value === "string") {
-    const escapedNormalized = value.replace(/\\\//g, "/");
-    const matches = escapedNormalized.match(/https?:\/\/[^\s"'<>`]+/gi) ?? [];
-    for (const match of matches) {
-      const cleaned = match.replace(/[)\],.;"'`]+$/g, "").trim();
-      if (isHttpUrl(cleaned)) {
-        sink.add(cleaned);
-      }
-      if (sink.size >= 16) {
-        return;
-      }
-    }
-    return;
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      collectHttpUrls(item, sink, depth + 1);
-      if (sink.size >= 16) return;
-    }
-    return;
-  }
-
-  const record = asObject(value);
-  if (!record) return;
-  for (const nested of Object.values(record)) {
-    collectHttpUrls(nested, sink, depth + 1);
-    if (sink.size >= 16) return;
-  }
-}
-
-function preferredMediaKeys(kind: InboundMediaKind): string[] {
-  switch (kind) {
-    case "image":
-      return [
-        "hdUrl",
-        "normalUrl",
-        "rawUrl",
-        "oriUrl",
-        "imageUrl",
-        "photoUrl",
-        "fileUrl",
-        "thumbUrl",
-        "thumb",
-        "href",
-        "url",
-        "src",
-      ];
-    case "video":
-      return [
-        "videoUrl",
-        "video_url",
-        "mediaUrl",
-        "streamUrl",
-        "playUrl",
-        "fileUrl",
-        "rawUrl",
-        "href",
-        "url",
-        "src",
-      ];
-    case "audio":
-      return [
-        "voiceUrl",
-        "m4aUrl",
-        "audioUrl",
-        "voice_url",
-        "m4a_url",
-        "audio_url",
-        "mediaUrl",
-        "downloadUrl",
-        "streamUrl",
-        "playUrl",
-        "fileUrl",
-        "rawUrl",
-        "href",
-        "url",
-        "src",
-      ];
-    case "file":
-      return [
-        "fileUrl",
-        "downloadUrl",
-        "rawUrl",
-        "normalUrl",
-        "oriUrl",
-        "fileLink",
-        "href",
-        "url",
-        "src",
-      ];
-  }
-}
-
-function resolvePreferredMediaUrls(kind: InboundMediaKind, content: unknown): string[] {
-  const ordered: string[] = [];
-  const seen = new Set<string>();
-  const push = (url: string) => {
-    if (!seen.has(url)) {
-      seen.add(url);
-      ordered.push(url);
-    }
-  };
-
-  const record = asObject(content);
-  if (record) {
-    for (const key of preferredMediaKeys(kind)) {
-      if (!(key in record)) continue;
-      const urls = new Set<string>();
-      collectHttpUrls(record[key], urls);
-      for (const url of urls) {
-        push(url);
-      }
-    }
-  }
-
-  const collected = new Set<string>();
-  collectHttpUrls(content, collected);
-  for (const url of collected) {
-    push(url);
-  }
-  return ordered;
-}
-
 function mediaExtFromTypeOrUrl(
   mediaType: string | null,
   mediaUrl: string,
@@ -4043,35 +3832,6 @@ async function cacheRemoteMediaEntries(params: {
       };
     }),
   );
-}
-
-function summarizeStructuredContent(msgType: unknown, content: unknown): string {
-  const normalizedType = normalizeMessageType(msgType);
-  const record = asObject(content);
-
-  if (normalizedType.includes("link") && record) {
-    const href = getStringCandidate(record, ["href", "url", "src"]);
-    if (href) return href;
-  }
-
-  if (record) {
-    const candidateText = getStringCandidate(record, [
-      "msg",
-      "message",
-      "text",
-      "caption",
-      "title",
-      "description",
-      "fileName",
-      "name",
-      "href",
-      "url",
-      "src",
-    ]);
-    if (candidateText) return candidateText;
-  }
-
-  return normalizedType ? `<non-text:${normalizedType}>` : "<non-text-message>";
 }
 
 function buildMediaAttachedText(params: {
@@ -4329,12 +4089,9 @@ function collectInboundMentions(
   }
 
   if (typeof value === "string") {
-    if (!looksLikeStructuredJsonString(value)) return;
-    try {
-      const parsed = JSON.parse(value);
+    const parsed = normalizeStructuredContent(value);
+    if (parsed !== value) {
       collectInboundMentions(parsed, sink, rawText, depth + 1);
-    } catch {
-      // ignore invalid JSON content
     }
     return;
   }
@@ -7686,11 +7443,13 @@ program
           const hasParsedStructuredContent = parsedContent !== rawContent;
           const rawText = typeof rawContent === "string" ? rawContent : "";
 
-          const mediaKind = detectInboundMediaKind(msgType, parsedContent);
+          const contentClassification = classifyInboundContent(msgType, parsedContent);
+          const contentKind = contentClassification.contentKind;
+          const mediaKind = contentClassification.mediaKind;
           const maxMediaFiles = parseMaxInboundMediaFiles();
           const remoteMediaUrls =
             mediaKind && maxMediaFiles > 0
-              ? resolvePreferredMediaUrls(mediaKind, parsedContent).slice(0, maxMediaFiles)
+              ? contentClassification.mediaUrls.slice(0, maxMediaFiles)
               : [];
           const quoteRemoteMediaUrls =
             quote && downloadQuoteMedia && maxMediaFiles > 0
@@ -7702,6 +7461,7 @@ program
               profile,
               threadId: message.threadId,
               msgType: msgType || undefined,
+              contentKind,
               mediaKind,
               hasParsedStructuredContent,
               remoteMediaUrls,
@@ -7803,7 +7563,7 @@ program
           const caption =
             rawText.trim().length > 0 && !hasParsedStructuredContent
               ? rawText.trim()
-              : summarizeStructuredContent(msgType, parsedContent);
+              : contentClassification.summary;
           let processedText = mediaEntries.length
             ? buildMediaAttachedText({
                 mediaEntries,
@@ -7812,7 +7572,7 @@ program
               })
             : rawText.trim().length > 0 && !hasParsedStructuredContent
               ? rawText
-              : summarizeStructuredContent(msgType, parsedContent);
+              : contentClassification.summary;
 
           if (!processedText.trim() && !replyContextText && !replyMediaText) return;
 
@@ -7870,6 +7630,7 @@ program
             type: message.type,
             timestamp,
             msgType: msgType || undefined,
+            contentKind,
             quote: quote ?? undefined,
             quoteMediaPath,
             quoteMediaPaths: quoteMediaPaths.length > 0 ? quoteMediaPaths : undefined,
@@ -7911,6 +7672,7 @@ program
               quoteMediaType,
               quoteMediaTypes: quoteMediaTypes.length > 0 ? quoteMediaTypes : undefined,
               timestamp,
+              contentKind,
               mediaPath,
               mediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
               mediaUrl,
@@ -7968,7 +7730,11 @@ program
                 msgType: msgType || undefined,
                 contentText: processedText || rawText || undefined,
                 contentJson:
-                  rawContent && typeof rawContent === "object" ? JSON.stringify(rawContent) : undefined,
+                  parsedContent && typeof parsedContent === "object"
+                    ? JSON.stringify(parsedContent)
+                    : rawContent && typeof rawContent === "object"
+                      ? JSON.stringify(rawContent)
+                      : undefined,
                 quoteMsgId: quote?.globalMsgId ? String(quote.globalMsgId) : undefined,
                 quoteCliMsgId: quote?.cliMsgId ? String(quote.cliMsgId) : undefined,
                 quoteOwnerId: quote?.ownerId ? String(quote.ownerId) : undefined,
@@ -8049,6 +7815,7 @@ program
             const timestampSource =
               eventData?.time ?? groupTopic?.createTime ?? groupTopic?.editTime ?? Date.now();
             const timestamp = toEpochSeconds(timestampSource);
+            const contentKind = classifyInboundContent("group_event", event).contentKind;
 
             const payload = {
               kind: "group_event",
@@ -8058,6 +7825,7 @@ program
               conversationId: event.threadId,
               type: ThreadType.Group,
               timestamp,
+              contentKind,
               groupEventType: event.type,
               act: event.act,
               poll,
@@ -8074,6 +7842,7 @@ program
                 senderId: actorId || undefined,
                 fromId: actorId || undefined,
                 timestamp,
+                contentKind,
                 groupEventType: event.type,
                 act: event.act,
                 poll,
