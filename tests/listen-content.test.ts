@@ -89,6 +89,19 @@ test("phone fields alone do not force an unknown payload to become a contact car
   assert.equal(result.summary, "0378146753");
 });
 
+test("explicit media messages are not reclassified by contact-shaped metadata", () => {
+  const result = classifyInboundContent("chat.photo", {
+    hdUrl: "https://example.test/photo.jpg",
+    title: "Photo title",
+    phone: "123",
+  });
+
+  assert.equal(result.contentKind, "media");
+  assert.equal(result.mediaKind, "image");
+  assert.deepEqual(result.mediaUrls, ["https://example.test/photo.jpg"]);
+  assert.equal(result.summary, "Photo title");
+});
+
 test("media messages extract preferred media URLs without sidecar URLs", () => {
   const content = {
     hdUrl: "https://example.test/photo.jpg",

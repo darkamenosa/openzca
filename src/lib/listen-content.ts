@@ -495,7 +495,9 @@ export function summarizeStructuredContent(msgType: unknown, content: unknown): 
     if (href) return href;
   }
 
-  if (contact && hasContactCardShape(contact, content)) {
+  const explicitMediaKind = classifyMediaKindFromType(normalizedType) ?? classifyMediaKindFromContent(content);
+
+  if (!explicitMediaKind && contact && hasContactCardShape(contact, content)) {
     return summarizeContact(contact);
   }
 
@@ -580,16 +582,6 @@ export function classifyInboundContent(
     };
   }
 
-  if (contact && hasContactCardShape(contact, content)) {
-    return {
-      contentKind: "contact",
-      mediaKind: null,
-      mediaUrls: [],
-      summary: summarizeContact(contact),
-      contact,
-    };
-  }
-
   const typeMediaKind = classifyMediaKindFromType(normalizedType);
   const mediaKind = typeMediaKind ?? classifyMediaKindFromContent(content);
   if (mediaKind) {
@@ -598,6 +590,16 @@ export function classifyInboundContent(
       mediaKind,
       mediaUrls: resolvePreferredMediaUrls(mediaKind, content),
       summary: summarizeStructuredContent(msgType, content),
+    };
+  }
+
+  if (contact && hasContactCardShape(contact, content)) {
+    return {
+      contentKind: "contact",
+      mediaKind: null,
+      mediaUrls: [],
+      summary: summarizeContact(contact),
+      contact,
     };
   }
 
