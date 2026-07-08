@@ -105,6 +105,21 @@ test("media messages extract preferred media URLs without sidecar URLs", () => {
   assert.deepEqual(resolvePreferredMediaUrls("image", content), ["https://example.test/photo.jpg"]);
 });
 
+test("doodle messages classify as image media from type", () => {
+  const result = classifyInboundContent("chat.doodle", {
+    title: "Doodle",
+    href: "https://example.test/doodle.png",
+    thumb: "https://example.test/thumb.jpg",
+  });
+
+  assert.equal(result.contentKind, "media");
+  assert.equal(result.mediaKind, "image");
+  assert.deepEqual(result.mediaUrls, [
+    "https://example.test/thumb.jpg",
+    "https://example.test/doodle.png",
+  ]);
+});
+
 test("group event payloads classify as event content", () => {
   const result = classifyInboundContent("group_event", {
     type: "update_board",

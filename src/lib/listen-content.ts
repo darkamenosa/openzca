@@ -315,7 +315,8 @@ function classifyMediaKindFromType(normalizedType: string): InboundMediaKind | n
   if (
     normalizedType.includes("photo") ||
     normalizedType.includes("gif") ||
-    normalizedType.includes("sticker")
+    normalizedType.includes("sticker") ||
+    normalizedType.includes("doodle")
   ) {
     return "image";
   }

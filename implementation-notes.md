@@ -8,3 +8,4 @@
 - The classifier is a reusable listener module rather than more private helpers in `src/cli.ts`, so future structured message types can be added without growing the CLI entrypoint.
 - During implementation, DB `content_json` for parsed structured listener content was switched to the normalized object when one exists. That preserves parsed nested fields such as `description.phone` for JSON-string payloads.
 - PR review follow-up: kept the documented `contentKind: "event"` contract and aligned runtime poll `group_event` payloads by emitting `contentKind` at the top level and under `metadata`.
+- PR review follow-up: kept `chat.doodle` on the media path by classifying doodle message types as image media before generic structured-content fallback.
