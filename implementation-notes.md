@@ -9,3 +9,4 @@
 - During implementation, DB `content_json` for parsed structured listener content was switched to the normalized object when one exists. That preserves parsed nested fields such as `description.phone` for JSON-string payloads.
 - PR review follow-up: kept the documented `contentKind: "event"` contract and aligned runtime poll `group_event` payloads by emitting `contentKind` at the top level and under `metadata`.
 - PR review follow-up: kept `chat.doodle` on the media path by classifying doodle message types as image media before generic structured-content fallback.
+- PR review follow-up: restored multi-URL media extraction by appending nested media-container/preferred-key URLs after top-level preferred URLs while still excluding arbitrary sidecar URLs such as `description.qrCodeUrl`.

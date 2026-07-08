@@ -199,7 +199,51 @@ function preferredMediaKeys(kind: InboundMediaKind): string[] {
   }
 }
 
-function collectPreferredMediaUrls(kind: InboundMediaKind, content: unknown): string[] {
+function nestedMediaKeys(kind: InboundMediaKind): string[] {
+  return preferredMediaKeys(kind).filter((key) => !["href", "url", "src", "thumb"].includes(key));
+}
+
+function isMediaContainerKey(key: string): boolean {
+  return [
+    "attachment",
+    "attachments",
+    "attach",
+    "attaches",
+    "media",
+    "medias",
+    "mediaitem",
+    "mediaitems",
+    "medialist",
+    "mediaurls",
+    "image",
+    "images",
+    "imageitem",
+    "imageitems",
+    "imagelist",
+    "imageurls",
+    "photo",
+    "photos",
+    "photoitem",
+    "photoitems",
+    "photolist",
+    "photourls",
+    "video",
+    "videos",
+    "videourls",
+    "audio",
+    "audios",
+    "audiourls",
+    "file",
+    "files",
+    "fileurls",
+  ].includes(key.toLowerCase().replace(/[_-]/g, ""));
+}
+
+function collectPreferredMediaUrls(
+  kind: InboundMediaKind,
+  content: unknown,
+  allowedKeys = preferredMediaKeys(kind),
+): string[] {
   const ordered: string[] = [];
   const seen = new Set<string>();
   const push = (url: string) => {
@@ -211,7 +255,7 @@ function collectPreferredMediaUrls(kind: InboundMediaKind, content: unknown): st
 
   const record = asObject(content);
   if (record) {
-    for (const key of preferredMediaKeys(kind)) {
+    for (const key of allowedKeys) {
       if (!(key in record)) continue;
       const urls = new Set<string>();
       collectHttpUrls(record[key], urls);
@@ -225,14 +269,85 @@ function collectPreferredMediaUrls(kind: InboundMediaKind, content: unknown): st
 }
 
 export function resolvePreferredMediaUrls(kind: InboundMediaKind, content: unknown): string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const push = (url: string) => {
+    if (!seen.has(url)) {
+      seen.add(url);
+      ordered.push(url);
+    }
+  };
+
   const preferred = collectPreferredMediaUrls(kind, content);
   if (preferred.length > 0) {
-    return preferred;
+    for (const url of preferred) {
+      push(url);
+    }
+    collectNestedMediaUrls(kind, content, push);
+    return ordered;
   }
 
   const collected = new Set<string>();
   collectHttpUrls(content, collected);
   return [...collected];
+}
+
+function collectNestedMediaUrls(
+  kind: InboundMediaKind,
+  value: unknown,
+  push: (url: string) => void,
+  depth = 0,
+  inMediaContainer = false,
+): void {
+  if (depth > 5) return;
+
+  if (typeof value === "string") {
+    if (!inMediaContainer) return;
+    const urls = new Set<string>();
+    collectHttpUrls(value, urls);
+    for (const url of urls) {
+      push(url);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectNestedMediaUrls(kind, item, push, depth + 1, inMediaContainer);
+    }
+    return;
+  }
+
+  const record = asObject(value);
+  if (!record) return;
+
+  const nestedKeys = new Set(nestedMediaKeys(kind).map((key) => key.toLowerCase().replace(/[_-]/g, "")));
+  const containerKeys = new Set(preferredMediaKeys(kind).map((key) => key.toLowerCase().replace(/[_-]/g, "")));
+  for (const [key, nested] of Object.entries(record)) {
+    const normalizedKey = key.toLowerCase().replace(/[_-]/g, "");
+    if ((inMediaContainer ? containerKeys : nestedKeys).has(normalizedKey)) {
+      const urls = new Set<string>();
+      collectHttpUrls(nested, urls);
+      for (const url of urls) {
+        push(url);
+      }
+      continue;
+    }
+
+    if (isMediaContainerKey(normalizedKey)) {
+      collectNestedMediaUrls(kind, nested, push, depth + 1, true);
+      continue;
+    }
+
+    if (inMediaContainer) {
+      if (Array.isArray(nested)) {
+        collectNestedMediaUrls(kind, nested, push, depth + 1, true);
+      }
+      continue;
+    }
+
+    collectNestedMediaUrls(kind, nested, push, depth + 1, false);
+  }
 }
 
 function getNestedRecord(record: Record<string, unknown>, key: string): Record<string, unknown> | null {

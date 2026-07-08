@@ -105,6 +105,40 @@ test("media messages extract preferred media URLs without sidecar URLs", () => {
   assert.deepEqual(resolvePreferredMediaUrls("image", content), ["https://example.test/photo.jpg"]);
 });
 
+test("media messages append nested attachment URLs after top-level preferred URLs", () => {
+  const content = {
+    hdUrl: "https://example.test/photo-main.jpg",
+    attachments: [
+      { rawUrl: "https://example.test/photo-raw.jpg" },
+      {
+        href: "https://example.test/photo-link.jpg",
+        thumb: "https://example.test/photo-thumb.jpg",
+        description: {
+          qrCodeUrl: "https://example.test/sidecar-qr.jpg",
+        },
+      },
+    ],
+    variants: {
+      imageUrl: "https://example.test/photo-variant.jpg",
+    },
+    description: {
+      qrCodeUrl: "https://example.test/top-level-sidecar-qr.jpg",
+    },
+  };
+
+  const result = classifyInboundContent("chat.photo", content);
+
+  assert.equal(result.contentKind, "media");
+  assert.equal(result.mediaKind, "image");
+  assert.deepEqual(result.mediaUrls, [
+    "https://example.test/photo-main.jpg",
+    "https://example.test/photo-raw.jpg",
+    "https://example.test/photo-link.jpg",
+    "https://example.test/photo-thumb.jpg",
+    "https://example.test/photo-variant.jpg",
+  ]);
+});
+
 test("doodle messages classify as image media from type", () => {
   const result = classifyInboundContent("chat.doodle", {
     title: "Doodle",
