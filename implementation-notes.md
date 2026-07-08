@@ -10,3 +10,4 @@
 - PR review follow-up: kept the documented `contentKind: "event"` contract and aligned runtime poll `group_event` payloads by emitting `contentKind` at the top level and under `metadata`.
 - PR review follow-up: kept `chat.doodle` on the media path by classifying doodle message types as image media before generic structured-content fallback.
 - PR review follow-up: restored multi-URL media extraction by appending nested media-container/preferred-key URLs after top-level preferred URLs while still excluding arbitrary sidecar URLs such as `description.qrCodeUrl`.
+- PR review follow-up: when a media payload has no top-level preferred URL, nested media-container/preferred-key URLs now win before any all-URL fallback, so nested-only attachments do not pull in sidecar URLs.

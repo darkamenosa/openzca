@@ -139,6 +139,19 @@ test("media messages append nested attachment URLs after top-level preferred URL
   ]);
 });
 
+test("media messages with nested-only attachments exclude sidecar URLs", () => {
+  const result = classifyInboundContent("chat.photo", {
+    attachments: [{ rawUrl: "https://example.test/real-photo.jpg" }],
+    description: {
+      qrCodeUrl: "https://example.test/sidecar-qr.jpg",
+    },
+  });
+
+  assert.equal(result.contentKind, "media");
+  assert.equal(result.mediaKind, "image");
+  assert.deepEqual(result.mediaUrls, ["https://example.test/real-photo.jpg"]);
+});
+
 test("doodle messages classify as image media from type", () => {
   const result = classifyInboundContent("chat.doodle", {
     title: "Doodle",

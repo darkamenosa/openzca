@@ -287,6 +287,11 @@ export function resolvePreferredMediaUrls(kind: InboundMediaKind, content: unkno
     return ordered;
   }
 
+  collectNestedMediaUrls(kind, content, push);
+  if (ordered.length > 0) {
+    return ordered;
+  }
+
   const collected = new Set<string>();
   collectHttpUrls(content, collected);
   return [...collected];
