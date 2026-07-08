@@ -7815,6 +7815,7 @@ program
             const timestampSource =
               eventData?.time ?? groupTopic?.createTime ?? groupTopic?.editTime ?? Date.now();
             const timestamp = toEpochSeconds(timestampSource);
+            const contentKind = classifyInboundContent("group_event", event).contentKind;
 
             const payload = {
               kind: "group_event",
@@ -7824,6 +7825,7 @@ program
               conversationId: event.threadId,
               type: ThreadType.Group,
               timestamp,
+              contentKind,
               groupEventType: event.type,
               act: event.act,
               poll,
@@ -7840,6 +7842,7 @@ program
                 senderId: actorId || undefined,
                 fromId: actorId || undefined,
                 timestamp,
+                contentKind,
                 groupEventType: event.type,
                 act: event.act,
                 poll,

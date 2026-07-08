@@ -104,3 +104,14 @@ test("media messages extract preferred media URLs without sidecar URLs", () => {
   assert.deepEqual(result.mediaUrls, ["https://example.test/photo.jpg"]);
   assert.deepEqual(resolvePreferredMediaUrls("image", content), ["https://example.test/photo.jpg"]);
 });
+
+test("group event payloads classify as event content", () => {
+  const result = classifyInboundContent("group_event", {
+    type: "update_board",
+    act: "create",
+  });
+
+  assert.equal(result.contentKind, "event");
+  assert.equal(result.mediaKind, null);
+  assert.deepEqual(result.mediaUrls, []);
+});

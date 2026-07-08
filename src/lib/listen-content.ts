@@ -450,6 +450,15 @@ export function classifyInboundContent(
     };
   }
 
+  if (normalizedType.includes("event")) {
+    return {
+      contentKind: "event",
+      mediaKind: null,
+      mediaUrls: [],
+      summary: summarizeStructuredContent(msgType, content),
+    };
+  }
+
   if (contact && hasContactCardShape(contact, content)) {
     return {
       contentKind: "contact",
