@@ -156,17 +156,20 @@ Group text sends resolve unique `@Name` or `@userId` mentions against the curren
 Listener media behavior (openzca additions):
 - Non-text inbound messages can be normalized into media note text in `content`.
 - `--raw` payload may include:
+  - `contentKind`
   - `mediaPath`, `mediaPaths`
   - `mediaUrl`, `mediaUrls`
   - `mediaType`, `mediaTypes`
   - `mediaKind`
   - `mentions`, `mentionIds`
   - `metadata.mentions`, `metadata.mentionIds`, `metadata.mentionCount`
+  - `metadata.contentKind`
   - `pollId`, `pollTitle`, `pollOptionIds`, `poll`
   - `metadata.pollId`, `metadata.pollTitle`, `metadata.pollOptionIds`, `metadata.poll`
   - `rawMessage` / `metadata.rawMessage` for poll message payloads
   - `rawGroupEvent` / `metadata.rawGroupEvent` for poll group-event payloads
 - Use `--self` to include events produced by the logged-in account, including polls this profile creates.
+- Structured non-media messages, including contact cards, may carry URLs without producing media downloads. Contact cards are summarized as `Contact card: <name>` plus `Phone: <phone>` when available and use `contentKind: "contact"`.
 - Default inbound media cache path is under OpenClaw state dir:
   - `~/.openclaw/media/openzca/<profile>/inbound`
   - or `${OPENCLAW_STATE_DIR}/media/openzca/<profile>/inbound`
