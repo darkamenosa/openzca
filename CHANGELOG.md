@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.60] - 2026-09-27
+
+### Changed
+
+- Bump `zca-js` dependency to `^2.2.0`
+
 ## [0.1.58] - 2026-04-13
 
 ### Added
